@@ -12,7 +12,7 @@ WEBHOOK_PASSPHRASE = os.environ.get('WEBHOOK_PASSPHRASE', 'BenimGizliSifrem123')
 
 # Binance İstemcisi
 client = Client(API_KEY, SECRET_KEY, testnet=True)
-
+client.FUTURES_URL = 'https://testnet.binancefuture.com/fapi'
 # Risk ve Pozisyon Parametreleri
 RISK_PERCENT = 0.02       # Her işlemde bakiyenin %2'si kadar risk
 STOP_LOSS_PCT = 0.015    # %1.5 Stop Loss
