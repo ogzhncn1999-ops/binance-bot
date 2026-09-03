@@ -6,11 +6,18 @@ from binance.client import Client
 
 app = Flask(__name__)
 
-# Binance Testnet API Bilgileri
 API_KEY = os.environ.get("BINANCE_API_KEY")
 API_SECRET = os.environ.get("BINANCE_API_SECRET")
 
-client = Client(API_KEY, API_SECRET, testnet=True)
+# Binance Testnet ve Kısıtlı Bölge Aşımı için İstemci Tanımı
+client = Client(
+    API_KEY, 
+    API_SECRET, 
+    testnet=True,
+    requests_params={"timeout": 10}
+)
+# Testnet Futures endpoint'ini doğrudan hedefleme
+client.FUTURES_URL = 'https://testnet.binancefuture.com/fapi'
 
 SYMBOL = "BTCUSDT"
 INTERVAL = Client.KLINE_INTERVAL_1MINUTE
@@ -29,7 +36,7 @@ def calculate_ema(prices, period):
 
 def run_trading_bot():
     global in_position, highest_price
-    print("Otomatik Trading Botu Başlatıldı...")
+    print("Otomatik Trading Botu Baslatildi...")
     
     while True:
         try:
@@ -47,7 +54,7 @@ def run_trading_bot():
                 ema_cross_up = (prev_ema20 <= prev_ema50) and (last_ema20 > last_ema50)
 
                 if not in_position and ema_cross_up:
-                    print(f"[{SYMBOL}] ALIM SİNYALİ! Fiyat: {current_price}")
+                    print(f"[{SYMBOL}] ALIM SINYALI! Fiyat: {current_price}")
                     client.futures_create_order(
                         symbol=SYMBOL, side="BUY", type="MARKET", quantity=QTY
                     )
@@ -60,7 +67,7 @@ def run_trading_bot():
                     
                     stop_price = highest_price * (1 - TRAILING_STOP_PERCENT)
                     if current_price <= stop_price:
-                        print(f"[{SYMBOL}] TRAILING STOP TETİKLENDİ! Fiyat: {current_price}")
+                        print(f"[{SYMBOL}] TRAILING STOP TETIKLENDI! Fiyat: {current_price}")
                         client.futures_create_order(
                             symbol=SYMBOL, side="SELL", type="MARKET", quantity=QTY
                         )
@@ -68,7 +75,7 @@ def run_trading_bot():
                         highest_price = 0.0
 
         except Exception as e:
-            print(f"Bot Hatası: {e}")
+            print(f"Bot Hatasi: {e}")
             
         time.sleep(10)
 
