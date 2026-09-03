@@ -1,108 +1,58 @@
 Python
 from flask import Flask, request, jsonify
-from binance.client import Client
 import os
+import requests
+import hmac
+import hashlib
+import time
 
 app = Flask(__name__)
 
-# Çevre Değişkenleri
 API_KEY = os.environ.get('BINANCE_API_KEY')
 SECRET_KEY = os.environ.get('BINANCE_SECRET_KEY')
 WEBHOOK_PASSPHRASE = os.environ.get('WEBHOOK_PASSPHRASE', 'BenimGizliSifrem123')
-
-# Risk ve Pozisyon Parametreleri
-RISK_PERCENT = 0.02
-STOP_LOSS_PCT = 0.015
-TAKE_PROFIT_PCT = 0.030
-LEVERAGE = 3
-
-def get_binance_client():
-    # Bağlantıyı sadece istek geldiğinde oluşturuyoruz (bölge engelini aşmak için)
-    client = Client(API_KEY, SECRET_KEY, testnet=True)
-    client.API_URL = 'https://testnet.binancefuture.com/fapi'
-    client.FUTURES_URL = 'https://testnet.binancefuture.com/fapi'
-    return client
+BASE_URL = 'https://testnet.binancefuture.com'
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({"status": "online", "message": "Binance Futures Botu Yayında!"}), 200
+    return jsonify({"status": "online", "message": "Bot Yayında!"}), 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
 
-    if not data:
-        return jsonify({"status": "error", "message": "Boş veri"}), 400
-
-    if data.get('passphrase') != WEBHOOK_PASSPHRASE:
+    if not data or data.get('passphrase') != WEBHOOK_PASSPHRASE:
         return jsonify({"status": "error", "message": "Yetkisiz Erişim!"}), 401
 
-    symbol = data.get('symbol', 'BTCUSDT')
-    side = data.get('side').upper()
+    symbol = data.get('symbol', 'BTCUSDT').upper()
+    side = data.get('side', 'BUY').upper()
 
     try:
-        client = get_binance_client()
-
-        # Kaldıraç Ayarla
-        try:
-            client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
-        except Exception as e:
-            print(f"Kaldıraç hatası: {e}")
-
         # Fiyat Al
-        ticker = client.futures_symbol_ticker(symbol=symbol)
-        price = float(ticker['price'])
+        ticker_res = requests.get(f"{BASE_URL}/fapi/v1/ticker/price", params={"symbol": symbol}).json()
+        price = float(ticker_res['price'])
 
-        # Bakiye ve Miktar
-        account_info = client.futures_account()
-        usdt_balance = float(account_info['availableBalance'])
-        trade_amount = usdt_balance * 0.1 * LEVERAGE
-        quantity = round(trade_amount / price, 3)
+        # İşlem Aç (Market Order)
+        timestamp = int(time.time() * 1000)
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "type": "MARKET",
+            "quantity": 0.001,
+            "timestamp": timestamp
+        }
 
-        if quantity <= 0:
-            return jsonify({"status": "error", "message": "Yetersiz bakiye"}), 400
+        query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
+        signature = hmac.new(SECRET_KEY.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
+        params['signature'] = signature
 
-        # Ana Market Emri
-        order = client.futures_create_order(
-            symbol=symbol,
-            side=side,
-            type='MARKET',
-            quantity=quantity
-        )
+        headers = {'X-MBX-APIKEY': API_KEY}
+        order_res = requests.post(f"{BASE_URL}/fapi/v1/order", headers=headers, params=params).json()
 
-        # Stop Loss ve Take Profit
-        exit_side = 'SELL' if side == 'BUY' else 'BUY'
-        sl_price = round(price * (1 - STOP_LOSS_PCT), 2) if side == 'BUY' else round(price * (1 + STOP_LOSS_PCT), 2)
-        tp_price = round(price * (1 + TAKE_PROFIT_PCT), 2) if side == 'BUY' else round(price * (1 - TAKE_PROFIT_PCT), 2)
-
-        client.futures_create_order(
-            symbol=symbol,
-            side=exit_side,
-            type='STOP_MARKET',
-            stopPrice=sl_price,
-            closePosition=True
-        )
-
-        client.futures_create_order(
-            symbol=symbol,
-            side=exit_side,
-            type='TAKE_PROFIT_MARKET',
-            stopPrice=tp_price,
-            closePosition=True
-        )
-
-        return jsonify({
-            "status": "success",
-            "message": f"{symbol} {side} emri açıldı.",
-            "price": price,
-            "sl": sl_price,
-            "tp": tp_price
-        }), 200
+        return jsonify({"status": "success", "data": order_res}), 200
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-
-    
