@@ -10,9 +10,11 @@ API_KEY = os.environ.get('BINANCE_API_KEY')
 SECRET_KEY = os.environ.get('BINANCE_SECRET_KEY')
 WEBHOOK_PASSPHRASE = os.environ.get('WEBHOOK_PASSPHRASE', 'BenimGizliSifrem123')
 
-# Binance İstemcisi
-client = Client(API_KEY, SECRET_KEY, testnet=True)
+# Binance İstemcisi (Bölge Engeli Korumalı Futures Testnet)
+client = Client(API_KEY, SECRET_KEY, requests_params={'timeout': 10})
+client.API_URL = 'https://testnet.binancefuture.com/fapi'
 client.FUTURES_URL = 'https://testnet.binancefuture.com/fapi'
+
 # Risk ve Pozisyon Parametreleri
 RISK_PERCENT = 0.02       # Her işlemde bakiyenin %2'si kadar risk
 STOP_LOSS_PCT = 0.015    # %1.5 Stop Loss
