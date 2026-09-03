@@ -1,7 +1,7 @@
+Python
 from flask import Flask, request, jsonify
 from binance.client import Client
 import os
-import math
 
 app = Flask(__name__)
 
@@ -10,40 +10,22 @@ API_KEY = os.environ.get('BINANCE_API_KEY')
 SECRET_KEY = os.environ.get('BINANCE_SECRET_KEY')
 WEBHOOK_PASSPHRASE = os.environ.get('WEBHOOK_PASSPHRASE', 'BenimGizliSifrem123')
 
-# Binance İstemcisi (Bölge Engeli Korumalı Futures Testnet)
-client = Client(API_KEY, SECRET_KEY, requests_params={'timeout': 10})
-client.API_URL = 'https://testnet.binancefuture.com/fapi'
-client.FUTURES_URL = 'https://testnet.binancefuture.com/fapi'
-
 # Risk ve Pozisyon Parametreleri
-RISK_PERCENT = 0.02       # Her işlemde bakiyenin %2'si kadar risk
-STOP_LOSS_PCT = 0.015    # %1.5 Stop Loss
-TAKE_PROFIT_PCT = 0.030   # %3.0 Take Profit (1:2 Risk/Ödül)
-LEVERAGE = 3              # 3x Kaldıraç
+RISK_PERCENT = 0.02
+STOP_LOSS_PCT = 0.015
+TAKE_PROFIT_PCT = 0.030
+LEVERAGE = 3
 
-def set_leverage(symbol, leverage):
-    try:
-        client.futures_change_leverage(symbol=symbol, leverage=leverage)
-    except Exception as e:
-        print(f"Kaldıraç ayarlanırken hata: {e}")
+def get_binance_client():
+    # Bağlantıyı sadece istek geldiğinde oluşturuyoruz (bölge engelini aşmak için)
+    client = Client(API_KEY, SECRET_KEY, testnet=True)
+    client.API_URL = 'https://testnet.binancefuture.com/fapi'
+    client.FUTURES_URL = 'https://testnet.binancefuture.com/fapi'
+    return client
 
-def get_quantity(symbol, price, balance_pct=0.1):
-    """
-    Bakiyeye ve kaldıraça göre güvenli lot miktarı hesaplar.
-    """
-    try:
-        account_info = client.futures_account()
-        usdt_balance = float(account_info['availableBalance'])
-        
-        # Bakiyenin belirlenen yüzdesi kadar marjin kullan
-        trade_amount = usdt_balance * balance_pct * LEVERAGE
-        quantity = trade_amount / price
-        
-        # Sembol adım hassasiyetine göre yuvarlama
-        return round(quantity, 3)
-    except Exception as e:
-        print(f"Miktar hesaplama hatası: {e}")
-        return 0
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({"status": "online", "message": "Binance Futures Botu Yayında!"}), 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -52,27 +34,35 @@ def webhook():
     if not data:
         return jsonify({"status": "error", "message": "Boş veri"}), 400
 
-    # 1. Webhook Şifre Doğrulaması (Authentication)
     if data.get('passphrase') != WEBHOOK_PASSPHRASE:
         return jsonify({"status": "error", "message": "Yetkisiz Erişim!"}), 401
 
     symbol = data.get('symbol', 'BTCUSDT')
-    side = data.get('side').upper() # 'BUY' (LONG) veya 'SELL' (SHORT)
-    
+    side = data.get('side').upper()
+
     try:
+        client = get_binance_client()
+
         # Kaldıraç Ayarla
-        set_leverage(symbol, LEVERAGE)
-        
-        # Güncel Fiyatı Al
+        try:
+            client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
+        except Exception as e:
+            print(f"Kaldıraç hatası: {e}")
+
+        # Fiyat Al
         ticker = client.futures_symbol_ticker(symbol=symbol)
         price = float(ticker['price'])
-        
-        # Dinamik Pozisyon Büyüklüğü Hesabı
-        quantity = get_quantity(symbol, price)
-        if quantity <= 0:
-            return jsonify({"status": "error", "message": "Yetersiz bakiye veya hatalı miktar"}), 400
 
-        # 2. Ana Piyasa Emrini Aç (MARKET)
+        # Bakiye ve Miktar
+        account_info = client.futures_account()
+        usdt_balance = float(account_info['availableBalance'])
+        trade_amount = usdt_balance * 0.1 * LEVERAGE
+        quantity = round(trade_amount / price, 3)
+
+        if quantity <= 0:
+            return jsonify({"status": "error", "message": "Yetersiz bakiye"}), 400
+
+        # Ana Market Emri
         order = client.futures_create_order(
             symbol=symbol,
             side=side,
@@ -80,17 +70,11 @@ def webhook():
             quantity=quantity
         )
 
-        # 3. Otomatik SL ve TP Fiyatlarını Hesapla
-        if side == 'BUY':
-            sl_price = round(price * (1 - STOP_LOSS_PCT), 2)
-            tp_price = round(price * (1 + TAKE_PROFIT_PCT), 2)
-            exit_side = 'SELL'
-        else: # SELL (SHORT)
-            sl_price = round(price * (1 + STOP_LOSS_PCT), 2)
-            tp_price = round(price * (1 - TAKE_PROFIT_PCT), 2)
-            exit_side = 'BUY'
+        # Stop Loss ve Take Profit
+        exit_side = 'SELL' if side == 'BUY' else 'BUY'
+        sl_price = round(price * (1 - STOP_LOSS_PCT), 2) if side == 'BUY' else round(price * (1 + STOP_LOSS_PCT), 2)
+        tp_price = round(price * (1 + TAKE_PROFIT_PCT), 2) if side == 'BUY' else round(price * (1 - TAKE_PROFIT_PCT), 2)
 
-        # 4. Binance Tarafında Gerçek Stop-Loss Emri
         client.futures_create_order(
             symbol=symbol,
             side=exit_side,
@@ -99,7 +83,6 @@ def webhook():
             closePosition=True
         )
 
-        # 5. Binance Tarafında Gerçek Take-Profit Emri
         client.futures_create_order(
             symbol=symbol,
             side=exit_side,
@@ -110,10 +93,10 @@ def webhook():
 
         return jsonify({
             "status": "success",
-            "message": f"{symbol} üzerinde {side} pozisyonu %1.5 SL ve %3.0 TP ile açıldı.",
-            "entry_price": price,
-            "sl_price": sl_price,
-            "tp_price": tp_price
+            "message": f"{symbol} {side} emri açıldı.",
+            "price": price,
+            "sl": sl_price,
+            "tp": tp_price
         }), 200
 
     except Exception as e:
@@ -121,3 +104,5 @@ def webhook():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+
+    
