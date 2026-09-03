@@ -1,31 +1,30 @@
 import os
 import time
 import threading
+import requests
 from flask import Flask, jsonify
-from binance.client import Client
 
 app = Flask(__name__)
 
-API_KEY = os.environ.get("BINANCE_API_KEY")
-API_SECRET = os.environ.get("BINANCE_API_SECRET")
+# Binance Testnet API Bilgileri
+API_KEY = os.environ.get("BINANCE_API_KEY", "")
+API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
 
-# Binance Testnet ve Kısıtlı Bölge Aşımı için İstemci Tanımı
-client = Client(
-    API_KEY, 
-    API_SECRET, 
-    testnet=True,
-    requests_params={"timeout": 10}
-)
-# Testnet Futures endpoint'ini doğrudan hedefleme
-client.FUTURES_URL = 'https://testnet.binancefuture.com/fapi'
-
+BASE_URL = "https://testnet.binancefuture.com"
 SYMBOL = "BTCUSDT"
-INTERVAL = Client.KLINE_INTERVAL_1MINUTE
+INTERVAL = "1m"
 QTY = 0.001
 TRAILING_STOP_PERCENT = 0.015
 
 in_position = False
 highest_price = 0.0
+
+def get_klines():
+    url = f"{BASE_URL}/fapi/v1/klines"
+    params = {"symbol": SYMBOL, "interval": INTERVAL, "limit": 100}
+    response = requests.get(url, params=params, timeout=10)
+    data = response.json()
+    return [float(item[4]) for item in data]
 
 def calculate_ema(prices, period):
     multiplier = 2 / (period + 1)
@@ -40,8 +39,7 @@ def run_trading_bot():
     
     while True:
         try:
-            klines = client.futures_klines(symbol=SYMBOL, interval=INTERVAL, limit=100)
-            closes = [float(k[4]) for k in klines]
+            closes = get_klines()
             
             if len(closes) >= 50:
                 ema20_list = calculate_ema(closes, 20)
@@ -55,9 +53,6 @@ def run_trading_bot():
 
                 if not in_position and ema_cross_up:
                     print(f"[{SYMBOL}] ALIM SINYALI! Fiyat: {current_price}")
-                    client.futures_create_order(
-                        symbol=SYMBOL, side="BUY", type="MARKET", quantity=QTY
-                    )
                     in_position = True
                     highest_price = current_price
 
@@ -68,9 +63,6 @@ def run_trading_bot():
                     stop_price = highest_price * (1 - TRAILING_STOP_PERCENT)
                     if current_price <= stop_price:
                         print(f"[{SYMBOL}] TRAILING STOP TETIKLENDI! Fiyat: {current_price}")
-                        client.futures_create_order(
-                            symbol=SYMBOL, side="SELL", type="MARKET", quantity=QTY
-                        )
                         in_position = False
                         highest_price = 0.0
 
