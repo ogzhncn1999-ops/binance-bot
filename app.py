@@ -11,7 +11,7 @@ SECRET_KEY = os.environ.get('BINANCE_SECRET_KEY')
 WEBHOOK_PASSPHRASE = os.environ.get('WEBHOOK_PASSPHRASE', 'BenimGizliSifrem123')
 
 # Binance İstemcisi
-client = Client(API_KEY, SECRET_KEY)
+client = Client(API_KEY, SECRET_KEY, testnet=True)
 
 # Risk ve Pozisyon Parametreleri
 RISK_PERCENT = 0.02       # Her işlemde bakiyenin %2'si kadar risk
