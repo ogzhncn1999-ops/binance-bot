@@ -9,8 +9,8 @@ from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-API_KEY = os.environ.get("BINANCE_API_KEY", "")
-API_SECRET = os.environ.get("BINANCE_API_SECRET", "")
+API_KEY = os.environ.get("BINANCE_API_KEY", "").strip()
+API_SECRET = os.environ.get("BINANCE_API_SECRET", "").strip()
 
 BASE_URL = "https://testnet.binancefuture.com"
 INTERVAL = "1m"
@@ -25,53 +25,57 @@ WATCHLIST = [
 
 highest_prices = {}
 
-def build_signature(params):
+def send_signed_request(method, endpoint, params=None):
+    """Binance API talepleri için doğru HMAC SHA256 imzalı istek atar."""
+    if params is None:
+        params = {}
+    
+    params["timestamp"] = int(time.time() * 1000)
     query_string = urllib.parse.urlencode(params)
+    
     signature = hmac.new(
         API_SECRET.encode('utf-8'),
         query_string.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()
-    return query_string, signature
+    
+    full_url = f"{BASE_URL}{endpoint}?{query_string}&signature={signature}"
+    headers = {"X-MBX-APIKEY": API_KEY}
+    
+    try:
+        if method == "GET":
+            response = requests.get(full_url, headers=headers, timeout=10)
+        elif method == "POST":
+            response = requests.post(full_url, headers=headers, timeout=10)
+        return response.json()
+    except Exception as e:
+        print(f"[API Istek Hatasi]: {e}")
+        return None
 
 def get_usdt_balance():
-    try:
-        url = f"{BASE_URL}/fapi/v2/balance"
-        params = {"timestamp": int(time.time() * 1000)}
-        query_string, signature = build_signature(params)
-        full_url = f"{url}?{query_string}&signature={signature}"
-        headers = {"X-MBX-APIKEY": API_KEY}
-        
-        res = requests.get(full_url, headers=headers, timeout=10).json()
-        if isinstance(res, list):
-            for item in res:
-                if item.get("asset") == "USDT":
-                    return float(item.get("balance", 0))
-    except Exception as e:
-        print(f"[HATA] Bakiye okuma hatasi: {e}")
+    res = send_signed_request("GET", "/fapi/v2/balance")
+    if isinstance(res, list):
+        for item in res:
+            if item.get("asset") == "USDT":
+                return float(item.get("balance", 0))
+    elif isinstance(res, dict) and "msg" in res:
+        print(f"[Binance Bakiye Hatasi]: {res.get('msg')}")
     return 0.0
 
 def get_open_positions():
     open_positions = {}
-    try:
-        url = f"{BASE_URL}/fapi/v2/positionRisk"
-        params = {"timestamp": int(time.time() * 1000)}
-        query_string, signature = build_signature(params)
-        full_url = f"{url}?{query_string}&signature={signature}"
-        headers = {"X-MBX-APIKEY": API_KEY}
-        
-        res = requests.get(full_url, headers=headers, timeout=10).json()
-        if isinstance(res, list):
-            for pos in res:
-                amt = float(pos.get("positionAmt", 0))
-                symbol = pos.get("symbol")
-                if amt != 0 and symbol in WATCHLIST:
-                    open_positions[symbol] = {
-                        "amount": amt,
-                        "entry_price": float(pos.get("entryPrice", 0))
-                    }
-    except Exception as e:
-        print(f"[HATA] Pozisyon kontrol hatasi: {e}")
+    res = send_signed_request("GET", "/fapi/v2/positionRisk")
+    if isinstance(res, list):
+        for pos in res:
+            amt = float(pos.get("positionAmt", 0))
+            symbol = pos.get("symbol")
+            if amt != 0 and symbol in WATCHLIST:
+                open_positions[symbol] = {
+                    "amount": amt,
+                    "entry_price": float(pos.get("entryPrice", 0))
+                }
+    elif isinstance(res, dict) and "msg" in res:
+        print(f"[Binance Pozisyon Hatasi]: {res.get('msg')}")
     return open_positions
 
 def get_klines(symbol):
@@ -93,25 +97,15 @@ def calculate_ema(prices, period):
     return ema
 
 def execute_order(symbol, side, quantity):
-    try:
-        url = f"{BASE_URL}/fapi/v1/order"
-        params = {
-            "symbol": symbol,
-            "side": side,
-            "type": "MARKET",
-            "quantity": quantity,
-            "timestamp": int(time.time() * 1000)
-        }
-        query_string, signature = build_signature(params)
-        full_url = f"{url}?{query_string}&signature={signature}"
-        headers = {"X-MBX-APIKEY": API_KEY}
-        
-        res = requests.post(full_url, headers=headers, timeout=10).json()
-        print(f"[{symbol}] {side} Emir Sonucu: {res}")
-        return res
-    except Exception as e:
-        print(f"[{symbol}] {side} Emir Hatasi: {e}")
-        return None
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": "MARKET",
+        "quantity": quantity
+    }
+    res = send_signed_request("POST", "/fapi/v1/order", params)
+    print(f"[{symbol}] {side} Emir Sonucu: {res}")
+    return res
 
 def analyze_opportunities(active_symbols):
     candidates = []
