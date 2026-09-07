@@ -9,13 +9,14 @@ from flask import Flask, jsonify
 
 app = Flask(__name__)
 
+# Render Environment Variables kontrolleri
 API_KEY = os.environ.get("BINANCE_API_KEY", "").strip()
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "").strip()
 
 BASE_URL = "https://testnet.binancefuture.com"
 INTERVAL = "1m"
-TRAILING_STOP_PERCENT = 0.015  # %1.5
-MAX_POSITIONS = 7               # En fazla 7 coin
+TRAILING_STOP_PERCENT = 0.015  # %1.5 Trailing Stop
+MAX_POSITIONS = 7               # En fazla 7 açık pozisyon
 ALLOCATION_PER_TRADE = 0.10     # Bakiyenin %10'u
 
 WATCHLIST = [
@@ -29,21 +30,21 @@ def send_signed_request(method, endpoint, params=None):
     if params is None:
         params = {}
     
-    # 1. Timestamp ekle
+    # Binance zaman senkronizasyonu ve timestamp parametreleri
+    params["recvWindow"] = 50000
     params["timestamp"] = int(time.time() * 1000)
     
-    # 2. Parametreleri Binance standartlarına uygun Alfabetik Sırala
+    # Parametreleri alfabetik sırala (Binance HMAC şartı)
     sorted_params = sorted(params.items())
     query_string = urllib.parse.urlencode(sorted_params)
     
-    # 3. HMAC SHA256 İmzası Üret
+    # HMAC SHA256 İmzası üret
     signature = hmac.new(
         API_SECRET.encode('utf-8'),
         query_string.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()
     
-    # 4. URL ve Header Yapılandırması
     full_url = f"{BASE_URL}{endpoint}?{query_string}&signature={signature}"
     headers = {
         "X-MBX-APIKEY": API_KEY,
@@ -132,6 +133,7 @@ def analyze_opportunities(active_symbols):
         last_ema20, prev_ema20 = ema20[-1], ema20[-2]
         last_ema50, prev_ema50 = ema50[-1], ema50[-2]
         
+        # EMA20, EMA50'yi yukarı kesiyor mu?
         ema_cross_up = (prev_ema20 <= prev_ema50) and (last_ema20 > last_ema50)
         
         if ema_cross_up:
@@ -147,14 +149,14 @@ def analyze_opportunities(active_symbols):
 
 def run_trading_bot():
     global highest_prices
-    print("Çoklu Coin Multi-Pair Botu Baslatildi...")
+    print("Coklu Coin Multi-Pair Botu Baslatildi...")
     
     while True:
         try:
             open_positions = get_open_positions()
             current_active_count = len(open_positions)
             
-            # Trailing Stop Kontrolü
+            # 1. Trailing Stop Takibi
             for symbol, details in list(open_positions.items()):
                 closes = get_klines(symbol)
                 if not closes:
@@ -175,7 +177,7 @@ def run_trading_bot():
                     if symbol in highest_prices:
                         del highest_prices[symbol]
 
-            # Yeni Sinyal Taraması
+            # 2. Yeni Sinyal Taraması
             if current_active_count < MAX_POSITIONS:
                 opportunities = analyze_opportunities(open_positions.keys())
                 
@@ -203,6 +205,7 @@ def run_trading_bot():
             
         time.sleep(10)
 
+# Botu arka planda çalıştır
 threading.Thread(target=run_trading_bot).start()
 
 @app.route('/')
