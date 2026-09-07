@@ -26,21 +26,29 @@ WATCHLIST = [
 highest_prices = {}
 
 def send_signed_request(method, endpoint, params=None):
-    """Binance API talepleri için doğru HMAC SHA256 imzalı istek atar."""
     if params is None:
         params = {}
     
+    # 1. Timestamp ekle
     params["timestamp"] = int(time.time() * 1000)
-    query_string = urllib.parse.urlencode(params)
     
+    # 2. Parametreleri Binance standartlarına uygun Alfabetik Sırala
+    sorted_params = sorted(params.items())
+    query_string = urllib.parse.urlencode(sorted_params)
+    
+    # 3. HMAC SHA256 İmzası Üret
     signature = hmac.new(
         API_SECRET.encode('utf-8'),
         query_string.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()
     
+    # 4. URL ve Header Yapılandırması
     full_url = f"{BASE_URL}{endpoint}?{query_string}&signature={signature}"
-    headers = {"X-MBX-APIKEY": API_KEY}
+    headers = {
+        "X-MBX-APIKEY": API_KEY,
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
     
     try:
         if method == "GET":
@@ -50,7 +58,7 @@ def send_signed_request(method, endpoint, params=None):
         return response.json()
     except Exception as e:
         print(f"[API Istek Hatasi]: {e}")
-        return None
+        return {}
 
 def get_usdt_balance():
     res = send_signed_request("GET", "/fapi/v2/balance")
@@ -137,14 +145,6 @@ def analyze_opportunities(active_symbols):
     candidates.sort(key=lambda x: x["score"], reverse=True)
     return candidates
 
-def keep_alive():
-    while True:
-        try:
-            time.sleep(300)
-            requests.get("https://binance-bot-3u50.onrender.com", timeout=10)
-        except:
-            pass
-
 def run_trading_bot():
     global highest_prices
     print("Çoklu Coin Multi-Pair Botu Baslatildi...")
@@ -154,7 +154,7 @@ def run_trading_bot():
             open_positions = get_open_positions()
             current_active_count = len(open_positions)
             
-            # 1. Trailing Stop Kontrolü
+            # Trailing Stop Kontrolü
             for symbol, details in list(open_positions.items()):
                 closes = get_klines(symbol)
                 if not closes:
@@ -175,7 +175,7 @@ def run_trading_bot():
                     if symbol in highest_prices:
                         del highest_prices[symbol]
 
-            # 2. Yeni Sinyal Taraması
+            # Yeni Sinyal Taraması
             if current_active_count < MAX_POSITIONS:
                 opportunities = analyze_opportunities(open_positions.keys())
                 
@@ -203,8 +203,7 @@ def run_trading_bot():
             
         time.sleep(10)
 
-threading.Thread(target=keep_alive, daemon=True).start()
-threading.Thread(target=run_trading_bot, daemon=True).start()
+threading.Thread(target=run_trading_bot).start()
 
 @app.route('/')
 def home():
