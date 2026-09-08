@@ -14,7 +14,7 @@ API_KEY = os.environ.get("BINANCE_API_KEY", "").strip()
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "").strip()
 
 BASE_URL = "https://testnet.binancefuture.com"
-INTERVAL = "1m"
+INTERVAL = "15m"
 TRAILING_STOP_PERCENT = 0.015  # %1.5 Trailing Stop
 MAX_POSITIONS = 7              # En fazla 7 açık pozisyon
 ALLOCATION_PER_TRADE = 0.10    # Bakiyenin %10'u
