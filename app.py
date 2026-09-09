@@ -14,14 +14,21 @@ API_KEY = os.environ.get("BINANCE_API_KEY", "").strip()
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "").strip()
 
 BASE_URL = "https://testnet.binancefuture.com"
-INTERVAL = "15m"
+INTERVAL = "15m"               # 15 dakikalık grafikler
 TRAILING_STOP_PERCENT = 0.015  # %1.5 Trailing Stop
 MAX_POSITIONS = 7              # En fazla 7 açık pozisyon
 ALLOCATION_PER_TRADE = 0.10    # Bakiyenin %10'u
 
+# ADIM 2: Daha Hızlı EMA Periyotları (EMA 9 / EMA 21)
+FAST_EMA_PERIOD = 9
+SLOW_EMA_PERIOD = 21
+
+# ADIM 1: Genişletilmiş Watchlist (18 Yüksek Hacimli Çift)
 WATCHLIST = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", 
-    "XRPUSDT", "BNBUSDT", "NEARUSDT", "DOGEUSDT", "ADAUSDT"
+    "XRPUSDT", "BNBUSDT", "NEARUSDT", "DOGEUSDT", "ADAUSDT",
+    "LINKUSDT", "LTCUSDT", "MATICUSDT", "DOTUSDT", "UNIUSDT",
+    "ATOMUSDT", "ARBUSDT", "OPUSDT", "APTUSDT"
 ]
 
 # En yüksek fiyat takibi için bellekte tutulan dict
@@ -36,7 +43,6 @@ def send_signed_request(method, endpoint, params=None):
     params['timestamp'] = int(time.time() * 1000)
     params['recvWindow'] = 50000
 
-    # Parametreleri alfabetik sırala
     sorted_params = sorted(params.items())
     query_string = urllib.parse.urlencode(sorted_params)
 
@@ -62,7 +68,7 @@ def send_signed_request(method, endpoint, params=None):
         return None
 
 
-def get_klines(symbol, limit=60):
+def get_klines(symbol, limit=50):
     """Kapanış fiyatlarını alır"""
     url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={INTERVAL}&limit={limit}"
     try:
@@ -114,39 +120,41 @@ def get_usdt_balance():
 
 
 def analyze_opportunities(active_symbols):
-    """Watchlist içindeki fırsatları analiz eder ve loglar"""
+    """Hızlı EMA ve Trend Katılımı ile Genişletilmiş Fırsat Taraması"""
     candidates = []
-    print(f"\n--- Market Taramasi Basladi ({len(WATCHLIST) - len(active_symbols)} coin taraniyor) ---")
+    print(f"\n--- Agresif Market Taramasi Basladi ({len(WATCHLIST) - len(active_symbols)} coin taraniyor) ---")
     
     for symbol in WATCHLIST:
         if symbol in active_symbols:
             continue
 
         closes = get_klines(symbol)
-        if len(closes) < 50:
-            print(f"[{symbol}] Yetersiz mum verisi ({len(closes)}/50)")
+        if len(closes) < SLOW_EMA_PERIOD + 2:
+            print(f"[{symbol}] Yetersiz mum verisi")
             continue
 
-        ema20 = calculate_ema(closes, 20)
-        ema50 = calculate_ema(closes, 50)
+        ema_fast = calculate_ema(closes, FAST_EMA_PERIOD)
+        ema_slow = calculate_ema(closes, SLOW_EMA_PERIOD)
 
         current_price = closes[-1]
-        last_ema20, prev_ema20 = ema20[-1], ema20[-2]
-        last_ema50, prev_ema50 = ema50[-1], ema50[-2]
+        last_fast, prev_fast = ema_fast[-1], ema_fast[-2]
+        last_slow, prev_slow = ema_slow[-1], ema_slow[-2]
 
-        # EMA20, EMA50'yi yukarı kesiyor mu?
-        ema_cross_up = (prev_ema20 <= prev_ema50) and (last_ema20 > last_ema50)
+        # Sinyal Koşulları (ADIM 3: Kesişim veya Süregelen Güçlü Trend):
+        is_cross_up = (prev_fast <= prev_slow) and (last_fast > last_slow)
+        is_strong_trend = (last_fast > last_slow) and (current_price > last_fast)
 
-        if ema_cross_up:
-            score = ((last_ema20 - last_ema50) / last_ema50) * 100
-            print(f"[{symbol}] 🔥 SINYAL YAKALANDI! (Fiyat: {current_price} | EMA20: {round(last_ema20, 4)} > EMA50: {round(last_ema50, 4)})")
+        if is_cross_up or is_strong_trend:
+            score = ((last_fast - last_slow) / last_slow) * 100
+            signal_type = "KESISIM (CROSS UP)" if is_cross_up else "TREND KATILIMI"
+            print(f"[{symbol}] 🔥 SINYAL YAKALANDI! Tip: {signal_type} | Fiyat: {current_price} | EMA9: {round(last_fast, 4)} > EMA21: {round(last_slow, 4)}")
             candidates.append({
                 "symbol": symbol,
                 "price": current_price,
                 "score": score
             })
         else:
-            print(f"[{symbol}] Taranıyor... Fiyat: {current_price} | EMA20: {round(last_ema20, 4)} | EMA50: {round(last_ema50, 4)} (Kesişim yok)")
+            print(f"[{symbol}] Taranıyor... Fiyat: {current_price} | EMA9: {round(last_fast, 4)} | EMA21: {round(last_slow, 4)} (Uygun sinyal yok)")
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
     return candidates
@@ -176,7 +184,6 @@ def execute_buy(symbol, price):
     res = send_signed_request("POST", "/fapi/v1/order", params)
     print(f"[{symbol}] BUY Emir Sonucu: {res}")
     
-    # En yüksek fiyat takibini başlat
     highest_prices[symbol] = price
 
 
@@ -189,7 +196,6 @@ def manage_trailing_stops(active_positions):
 
         current_price = closes[-1]
         
-        # En yüksek fiyatı güncelle
         if symbol not in highest_prices:
             highest_prices[symbol] = max(pos_data["entry_price"], current_price)
         else:
@@ -216,7 +222,7 @@ def manage_trailing_stops(active_positions):
 
 def bot_loop():
     """Bot Ana Döngüsü"""
-    print("Coklu Coin Multi-Pair Botu Baslatildi...")
+    print("Agresif Multi-Pair Bot (18 Coin + EMA 9/21) Baslatildi...")
     while True:
         try:
             active_positions = get_active_positions()
@@ -230,10 +236,9 @@ def bot_loop():
             if len(active_positions) < MAX_POSITIONS:
                 candidates = analyze_opportunities(active_symbols)
                 
-                # En yüksek skorlu 1 adedini al
                 if candidates:
                     top_candidate = candidates[0]
-                    print(f"[{top_candidate['symbol']}] SINYAL YAKALANDI! Alim Yapiliyor...")
+                    print(f"[{top_candidate['symbol']}] SINYAL ONAYLANDI! Alim Yapiliyor...")
                     execute_buy(top_candidate['symbol'], top_candidate['price'])
 
         except Exception as e:
@@ -250,7 +255,7 @@ threading.Thread(target=bot_loop, daemon=True).start()
 def home():
     active_positions = get_active_positions()
     return jsonify({
-        "status": "Multi-Pair Bot Active",
+        "status": "Aggressive Multi-Pair Bot Active (18 Symbols)",
         "active_positions": list(active_positions.keys()),
         "active_positions_count": len(active_positions),
         "max_allowed": MAX_POSITIONS
