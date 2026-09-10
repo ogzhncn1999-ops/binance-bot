@@ -9,18 +9,21 @@ from flask import Flask, jsonify
 
 app = Flask(__name__)
 
-# Render Environment Variables kontrolleri
+# Render Environment Variables
 API_KEY = os.environ.get("BINANCE_API_KEY", "").strip()
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "").strip()
 
 BASE_URL = "https://testnet.binancefuture.com"
 INTERVAL = "15m"               # 15 dakikalık grafikler
-TRAILING_STOP_PERCENT = 0.015  # %1.5 Trailing Stop
+TRAILING_STOP_PERCENT = 0.030  # %3.0 Trailing Stop (Genişletilmiş Esnek Stop)
 MAX_POSITIONS = 7              # En fazla 7 açık pozisyon
 ALLOCATION_PER_TRADE = 0.10    # Bakiyenin %10'u
+TARGET_LEVERAGE = 3            # Düşük risk için 3x Kaldıraç
 
 FAST_EMA_PERIOD = 9
 SLOW_EMA_PERIOD = 21
+RSI_PERIOD = 14
+VOLUME_MA_PERIOD = 20
 
 WATCHLIST = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", 
@@ -65,16 +68,24 @@ def send_signed_request(method, endpoint, params=None):
         return None
 
 
-def get_klines(symbol, limit=50):
+def set_leverage(symbol, leverage=TARGET_LEVERAGE):
+    """Sembolün kaldıracını otomatik ayarlar"""
+    params = {"symbol": symbol, "leverage": leverage}
+    res = send_signed_request("POST", "/fapi/v1/leverage", params)
+    print(f"[{symbol}] Kaldıraç {leverage}x olarak ayarlandı: {res}")
+
+
+def get_klines(symbol, limit=60):
     url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={INTERVAL}&limit={limit}"
     try:
         res = requests.get(url, timeout=10).json()
         if isinstance(res, list):
             closes = [float(k[4]) for k in res]
-            return closes
+            volumes = [float(k[5]) for k in res]
+            return closes, volumes
     except Exception as e:
         print(f"[{symbol}] Klines alma hatası: {e}")
-    return []
+    return [], []
 
 
 def calculate_ema(prices, period):
@@ -85,6 +96,33 @@ def calculate_ema(prices, period):
     for price in prices[period:]:
         ema.append((price * k) + (ema[-1] * (1 - k)))
     return ema
+
+
+def calculate_rsi(prices, period=RSI_PERIOD):
+    if len(prices) < period + 1:
+        return 50.0
+    gains = []
+    losses = []
+    for i in range(1, len(prices)):
+        change = prices[i] - prices[i - 1]
+        if change >= 0:
+            gains.append(change)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(change))
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
 
 
 def get_active_positions():
@@ -116,19 +154,25 @@ def get_usdt_balance():
 
 def analyze_opportunities(active_symbols):
     candidates = []
-    print(f"\n--- Çift Yönlü Market Taraması Başladı ({len(WATCHLIST) - len(active_symbols)} coin taranıyor) ---")
+    print(f"\n--- Çift Yönlü Market Taraması (Filtreli) ({len(WATCHLIST) - len(active_symbols)} coin taranıyor) ---")
     
     for symbol in WATCHLIST:
         if symbol in active_symbols:
             continue
 
-        closes = get_klines(symbol)
-        if len(closes) < SLOW_EMA_PERIOD + 2:
-            print(f"[{symbol}] Yetersiz mum verisi")
+        closes, volumes = get_klines(symbol)
+        if len(closes) < SLOW_EMA_PERIOD + 5 or len(volumes) < VOLUME_MA_PERIOD:
+            print(f"[{symbol}] Yetersiz mum/hacim verisi")
             continue
 
         ema_fast = calculate_ema(closes, FAST_EMA_PERIOD)
         ema_slow = calculate_ema(closes, SLOW_EMA_PERIOD)
+        current_rsi = calculate_rsi(closes)
+
+        # Hacim Filtresi: Son mum hacmi > Son 20 mum ortalama hacmi
+        avg_volume = sum(volumes[-VOLUME_MA_PERIOD:]) / VOLUME_MA_PERIOD
+        current_volume = volumes[-1]
+        volume_confirmed = current_volume > avg_volume
 
         current_price = closes[-1]
         last_fast, prev_fast = ema_fast[-1], ema_fast[-2]
@@ -140,20 +184,21 @@ def analyze_opportunities(active_symbols):
         is_short_cross = (prev_fast >= prev_slow) and (last_fast < last_slow)
         is_short_trend = (last_fast < last_slow) and (current_price < last_fast)
 
-        if is_long_cross or is_long_trend:
+        # LONG Sinyali: EMA Alım + RSI Doygun Değil (<65) + Hacim Onaylı
+        if (is_long_cross or is_long_trend) and current_rsi < 65 and volume_confirmed:
             score = abs((last_fast - last_slow) / last_slow) * 100
-            signal_type = "LONG (CROSS UP)" if is_long_cross else "LONG (TREND KATILIMI)"
-            print(f"[{symbol}] 🚀 LONG SİNYALİ! Tip: {signal_type} | Fiyat: {current_price} | EMA9: {round(last_fast, 4)} > EMA21: {round(last_slow, 4)}")
+            print(f"[{symbol}] 🚀 LONG ONAYLANDI! Fiyat: {current_price} | RSI: {current_rsi} < 65 | Hacim: ONAYLI")
             candidates.append({
                 "symbol": symbol,
                 "price": current_price,
                 "side": "BUY",
                 "score": score
             })
-        elif is_short_cross or is_short_trend:
+
+        # SHORT Sinyali: EMA Satım + RSI Doygun Değil (>35) + Hacim Onaylı
+        elif (is_short_cross or is_short_trend) and current_rsi > 35 and volume_confirmed:
             score = abs((last_fast - last_slow) / last_slow) * 100
-            signal_type = "SHORT (CROSS DOWN)" if is_short_cross else "SHORT (TREND KATILIMI)"
-            print(f"[{symbol}] 🔻 SHORT SİNYALİ! Tip: {signal_type} | Fiyat: {current_price} | EMA9: {round(last_fast, 4)} < EMA21: {round(last_slow, 4)}")
+            print(f"[{symbol}] 🔻 SHORT ONAYLANDI! Fiyat: {current_price} | RSI: {current_rsi} > 35 | Hacim: ONAYLI")
             candidates.append({
                 "symbol": symbol,
                 "price": current_price,
@@ -161,7 +206,7 @@ def analyze_opportunities(active_symbols):
                 "score": score
             })
         else:
-            print(f"[{symbol}] Taranıyor... Fiyat: {current_price} | EMA9: {round(last_fast, 4)} | EMA21: {round(last_slow, 4)} (Uygun sinyal yok)")
+            print(f"[{symbol}] Fiyat: {current_price} | RSI: {current_rsi} | EMA9: {round(last_fast, 2)} | EMA21: {round(last_slow, 2)} (Filtre Takıldı)")
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
     return candidates
@@ -173,10 +218,12 @@ def execute_order(symbol, price, side):
         print(f"[{symbol}] Yetersiz bakiye: {balance} USDT")
         return
 
+    # Önce kaldıracı 3x yapalım
+    set_leverage(symbol, TARGET_LEVERAGE)
+
     trade_amount_usdt = balance * ALLOCATION_PER_TRADE
     qty = round(trade_amount_usdt / price, 3)
 
-    # Minimum lot sınırını kontrol eden düzeltme
     if symbol == "BTCUSDT" and qty < 0.001:
         qty = 0.001
 
@@ -202,7 +249,7 @@ def execute_order(symbol, price, side):
 
 def manage_trailing_stops(active_positions):
     for symbol, pos_data in active_positions.items():
-        closes = get_klines(symbol, limit=2)
+        closes, _ = get_klines(symbol, limit=2)
         if not closes:
             continue
 
@@ -216,7 +263,7 @@ def manage_trailing_stops(active_positions):
                 highest_prices[symbol] = max(highest_prices[symbol], current_price)
 
             stop_price = highest_prices[symbol] * (1 - TRAILING_STOP_PERCENT)
-            print(f"[{symbol}] LONG İzleniyor -> Güncel: {current_price} | Zirve: {highest_prices[symbol]} | Stop: {round(stop_price, 4)}")
+            print(f"[{symbol}] LONG İzleniyor -> Güncel: {current_price} | Zirve: {highest_prices[symbol]} | Stop (%3): {round(stop_price, 4)}")
 
             if current_price <= stop_price:
                 print(f"[{symbol}] 🛑 LONG TRAILING STOP TETİKLENDİ! Pozisyon kapatılıyor...")
@@ -239,7 +286,7 @@ def manage_trailing_stops(active_positions):
                 lowest_prices[symbol] = min(lowest_prices[symbol], current_price)
 
             stop_price = lowest_prices[symbol] * (1 + TRAILING_STOP_PERCENT)
-            print(f"[{symbol}] SHORT İzleniyor -> Güncel: {current_price} | Dip: {lowest_prices[symbol]} | Stop: {round(stop_price, 4)}")
+            print(f"[{symbol}] SHORT İzleniyor -> Güncel: {current_price} | Dip: {lowest_prices[symbol]} | Stop (%3): {round(stop_price, 4)}")
 
             if current_price >= stop_price:
                 print(f"[{symbol}] 🛑 SHORT TRAILING STOP TETİKLENDİ! Pozisyon kapatılıyor...")
@@ -257,7 +304,7 @@ def manage_trailing_stops(active_positions):
 
 
 def bot_loop():
-    print("Çift Yönlü Multi-Pair Bot Başlatıldı...")
+    print("Filtreli & Düşük Riskli Çift Yönlü Bot Başlatıldı...")
     while True:
         try:
             active_positions = get_active_positions()
@@ -271,7 +318,7 @@ def bot_loop():
                 
                 if candidates:
                     top_candidate = candidates[0]
-                    print(f"[{top_candidate['symbol']}] SİNYAL ONAYLANDI! Yön: {top_candidate['side']} İşlem Yapılıyor...")
+                    print(f"[{top_candidate['symbol']}] FİLTRELİ SİNYAL ONAYLANDI! Yön: {top_candidate['side']} İşlem Yapılıyor...")
                     execute_order(top_candidate['symbol'], top_candidate['price'], top_candidate['side'])
 
         except Exception as e:
@@ -287,7 +334,9 @@ threading.Thread(target=bot_loop, daemon=True).start()
 def home():
     active_positions = get_active_positions()
     return jsonify({
-        "status": "Bi-Directional Multi-Pair Bot Active",
+        "status": "Bi-Directional Multi-Pair Bot Active (Filtered & Low Risk)",
+        "leverage": f"{TARGET_LEVERAGE}x",
+        "trailing_stop": f"%{TRAILING_STOP_PERCENT * 100}",
         "active_positions": list(active_positions.keys()),
         "active_positions_count": len(active_positions),
         "max_allowed": MAX_POSITIONS
