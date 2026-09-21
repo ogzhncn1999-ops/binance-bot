@@ -75,7 +75,6 @@ def send_signed_request(method, endpoint, params=None):
 
 
 def set_leverage(symbol, leverage=TARGET_LEVERAGE):
-    """Sembolün kaldıracını otomatik ayarlar"""
     params = {"symbol": symbol, "leverage": leverage}
     res = send_signed_request("POST", "/fapi/v1/leverage", params)
     print(f"[{symbol}] Kaldıraç {leverage}x olarak ayarlandı: {res}")
@@ -83,21 +82,14 @@ def set_leverage(symbol, leverage=TARGET_LEVERAGE):
 
 def get_klines(symbol, limit=100):
     url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={INTERVAL}&limit={limit}"
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0'
-    }
-    
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         response = requests.get(url, headers=headers, timeout=10)
         res = response.json()
-
         if isinstance(res, list) and len(res) > 0:
             closes = [float(k[4]) for k in res]
             volumes = [float(k[5]) for k in res]
             return closes, volumes
-        else:
-            print(f"[{symbol}] Klines yanıt hatası: {res}")
     except Exception as e:
         print(f"[{symbol}] Klines alma hatası: {e}")
     return [], []
@@ -160,9 +152,11 @@ def get_active_positions():
 
 def get_usdt_balance():
     res = send_signed_request("GET", "/fapi/v2/account")
+    print(f"[DEBUG Bakiye Yaniti]: {res}")  # Binance'den gelen ham yanıtı loglarda göreceğiz
     if isinstance(res, dict) and "assets" in res:
         for asset in res["assets"]:
             if asset.get("asset") == "USDT":
+                # availableBalance veya withdrawAvailable alanlarını kontrol ediyoruz
                 return float(asset.get("availableBalance", 0))
     return 0.0
 
@@ -176,12 +170,9 @@ def analyze_opportunities(active_symbols):
             continue
 
         closes, volumes = get_klines(symbol)
-        
-        # Binance rate limit (IP Ban) riskini tamamen ortadan kaldırmak için güvenli bekleme
-        time.sleep(1.0)
+        time.sleep(1.0)  # Rate limit koruması
         
         if len(closes) < 30 or len(volumes) < 20:
-            print(f"[{symbol}] Yetersiz mum/hacim verisi (Alınan mum sayısı: {len(closes)})")
             continue
 
         ema_fast = calculate_ema(closes, FAST_EMA_PERIOD)
@@ -202,29 +193,15 @@ def analyze_opportunities(active_symbols):
         is_short_cross = (prev_fast >= prev_slow) and (last_fast < last_slow)
         is_short_trend = (last_fast < last_slow) and (current_price < last_fast)
 
-        # LONG Sinyali
         if (is_long_cross or is_long_trend) and current_rsi < 65 and volume_confirmed:
             score = abs((last_fast - last_slow) / last_slow) * 100
             print(f"[{symbol}] 🚀 LONG ONAYLANDI! Fiyat: {current_price} | RSI: {current_rsi} < 65 | Hacim: ONAYLI")
-            candidates.append({
-                "symbol": symbol,
-                "price": current_price,
-                "side": "BUY",
-                "score": score
-            })
+            candidates.append({"symbol": symbol, "price": current_price, "side": "BUY", "score": score})
 
-        # SHORT Sinyali
         elif (is_short_cross or is_short_trend) and current_rsi > 35 and volume_confirmed:
             score = abs((last_fast - last_slow) / last_slow) * 100
             print(f"[{symbol}] 🔻 SHORT ONAYLANDI! Fiyat: {current_price} | RSI: {current_rsi} > 35 | Hacim: ONAYLI")
-            candidates.append({
-                "symbol": symbol,
-                "price": current_price,
-                "side": "SELL",
-                "score": score
-            })
-        else:
-            print(f"[{symbol}] Fiyat: {current_price} | RSI: {current_rsi} | EMA9: {round(last_fast, 2)} | EMA21: {round(last_slow, 2)} (Filtre Takıldı)")
+            candidates.append({"symbol": symbol, "price": current_price, "side": "SELL", "score": score})
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
     return candidates
@@ -235,7 +212,7 @@ def execute_order(symbol, price, side):
     print(f"[{symbol}] Güncel Futures Bakiyesi: {balance} USDT")
     
     if balance < 5:
-        print(f"[{symbol}] Yetersiz bakiye: {balance} USDT")
+        print(f"[{symbol}] Yetersiz bakiye: {balance} USDT (Lütfen Futures cüzdan bakiyenizi ve API yetkilerinizi kontrol edin)")
         return
 
     set_leverage(symbol, TARGET_LEVERAGE)
@@ -282,19 +259,11 @@ def manage_trailing_stops(active_positions):
                 highest_prices[symbol] = max(highest_prices[symbol], current_price)
 
             stop_price = highest_prices[symbol] * (1 - TRAILING_STOP_PERCENT)
-            print(f"[{symbol}] LONG İzleniyor -> Güncel: {current_price} | Zirve: {highest_prices[symbol]} | Stop (%3): {round(stop_price, 4)}")
-
             if current_price <= stop_price:
-                print(f"[{symbol}] 🛑 LONG TRAILING STOP TETİKLENDİ! Pozisyon kapatılıyor...")
-                params = {
-                    "symbol": symbol,
-                    "side": "SELL",
-                    "type": "MARKET",
-                    "quantity": abs(pos_data["amount"]),
-                    "reduceOnly": "true"
-                }
+                print(f"[{symbol}] 🛑 LONG TRAILING STOP TETİKLENDİ!")
+                params = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": abs(pos_data["amount"]), "reduceOnly": "true"}
                 res = send_signed_request("POST", "/fapi/v1/order", params)
-                print(f"[{symbol}] LONG Kapatma Sonucu: {res}")
+                print(f"[{symbol}] Sonuç: {res}")
                 if symbol in highest_prices:
                     del highest_prices[symbol]
 
@@ -305,19 +274,11 @@ def manage_trailing_stops(active_positions):
                 lowest_prices[symbol] = min(lowest_prices[symbol], current_price)
 
             stop_price = lowest_prices[symbol] * (1 + TRAILING_STOP_PERCENT)
-            print(f"[{symbol}] SHORT İzleniyor -> Güncel: {current_price} | Dip: {lowest_prices[symbol]} | Stop (%3): {round(stop_price, 4)}")
-
             if current_price >= stop_price:
-                print(f"[{symbol}] 🛑 SHORT TRAILING STOP TETİKLENDİ! Pozisyon kapatılıyor...")
-                params = {
-                    "symbol": symbol,
-                    "side": "BUY",
-                    "type": "MARKET",
-                    "quantity": abs(pos_data["amount"]),
-                    "reduceOnly": "true"
-                }
+                print(f"[{symbol}] 🛑 SHORT TRAILING STOP TETİKLENDİ!")
+                params = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quantity": abs(pos_data["amount"]), "reduceOnly": "true"}
                 res = send_signed_request("POST", "/fapi/v1/order", params)
-                print(f"[{symbol}] SHORT Kapatma Sonucu: {res}")
+                print(f"[{symbol}] Sonuç: {res}")
                 if symbol in lowest_prices:
                     del lowest_prices[symbol]
 
@@ -351,20 +312,15 @@ def home():
     active_positions = get_active_positions()
     pos_list = list(active_positions.keys()) if isinstance(active_positions, dict) else []
     return jsonify({
-        "status": "Bi-Directional Multi-Pair Bot Active (Filtered & Low Risk)",
+        "status": "Bi-Directional Multi-Pair Bot Active",
         "leverage": f"{TARGET_LEVERAGE}x",
-        "trailing_stop": f"%{TRAILING_STOP_PERCENT * 100}",
-        "active_positions": pos_list,
-        "active_positions_count": len(pos_list),
-        "max_allowed": MAX_POSITIONS
+        "active_positions": pos_list
     })
 
 
-# Arka plan tarama thread'ini başlat
 scanner_thread = threading.Thread(target=bot_loop, daemon=True)
 scanner_thread.start()
 
-# Render ve Gunicorn için Port Ayarı
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
