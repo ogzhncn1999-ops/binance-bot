@@ -13,7 +13,13 @@ app = Flask(__name__)
 API_KEY = os.environ.get("BINANCE_API_KEY", "").strip()
 API_SECRET = os.environ.get("BINANCE_API_SECRET", "").strip()
 
-BASE_URL = "https://testnet.binancefuture.com"
+# --- CANLI/TESTNET ORTAM KONTROLÜ ---
+TESTNET = os.environ.get("TESTNET", "False").lower() == "true"
+if TESTNET:
+    BASE_URL = "https://testnet.binancefuture.com"
+else:
+    BASE_URL = "https://fapi.binance.com"  # Canlı Binance Futures Endpoint
+
 INTERVAL = "15m"               # 15 dakikalık grafikler
 TRAILING_STOP_PERCENT = 0.030  # %3.0 Trailing Stop (Genişletilmiş Esnek Stop)
 MAX_POSITIONS = 7              # En fazla 7 açık pozisyon
@@ -214,7 +220,10 @@ def analyze_opportunities(active_symbols):
 
 def execute_order(symbol, price, side):
     balance = get_usdt_balance()
-    if balance <= 10:
+    print(f"[{symbol}] Güncel Futures Bakiyesi: {balance} USDT")
+    
+    # Bakiye kontrol sınırı 5 USDT'ye düşürüldü
+    if balance < 5:
         print(f"[{symbol}] Yetersiz bakiye: {balance} USDT")
         return
 
@@ -324,7 +333,8 @@ def bot_loop():
         except Exception as e:
             print(f"[Ana Dongu Hatasi]: {e}")
 
-        time.sleep(10)
+        # 2 dakikada (120 saniye) bir piyasayı tarar
+        time.sleep(120)
 
 
 threading.Thread(target=bot_loop, daemon=True).start()
