@@ -21,7 +21,7 @@ else:
     BASE_URL = "https://fapi.binance.com"  # Canlı Binance Futures Endpoint
 
 INTERVAL = "15m"               # 15 dakikalık grafikler
-TRAILING_STOP_PERCENT = 0.030  # %3.0 Trailing Stop (Genişletilmiş Esnek Stop)
+TRAILING_STOP_PERCENT = 0.030  # %3.0 Trailing Stop
 MAX_POSITIONS = 7              # En fazla 7 açık pozisyon
 ALLOCATION_PER_TRADE = 0.10    # Bakiyenin %10'u
 TARGET_LEVERAGE = 3            # Düşük risk için 3x Kaldıraç
@@ -190,7 +190,7 @@ def analyze_opportunities(active_symbols):
         is_short_cross = (prev_fast >= prev_slow) and (last_fast < last_slow)
         is_short_trend = (last_fast < last_slow) and (current_price < last_fast)
 
-        # LONG Sinyali: EMA Alım + RSI Doygun Değil (<65) + Hacim Onaylı
+        # LONG Sinyali
         if (is_long_cross or is_long_trend) and current_rsi < 65 and volume_confirmed:
             score = abs((last_fast - last_slow) / last_slow) * 100
             print(f"[{symbol}] 🚀 LONG ONAYLANDI! Fiyat: {current_price} | RSI: {current_rsi} < 65 | Hacim: ONAYLI")
@@ -201,7 +201,7 @@ def analyze_opportunities(active_symbols):
                 "score": score
             })
 
-        # SHORT Sinyali: EMA Satım + RSI Doygun Değil (>35) + Hacim Onaylı
+        # SHORT Sinyali
         elif (is_short_cross or is_short_trend) and current_rsi > 35 and volume_confirmed:
             score = abs((last_fast - last_slow) / last_slow) * 100
             print(f"[{symbol}] 🔻 SHORT ONAYLANDI! Fiyat: {current_price} | RSI: {current_rsi} > 35 | Hacim: ONAYLI")
@@ -222,12 +222,10 @@ def execute_order(symbol, price, side):
     balance = get_usdt_balance()
     print(f"[{symbol}] Güncel Futures Bakiyesi: {balance} USDT")
     
-    # Bakiye kontrol sınırı 5 USDT'ye düşürüldü
     if balance < 5:
         print(f"[{symbol}] Yetersiz bakiye: {balance} USDT")
         return
 
-    # Önce kaldıracı 3x yapalım
     set_leverage(symbol, TARGET_LEVERAGE)
 
     trade_amount_usdt = balance * ALLOCATION_PER_TRADE
@@ -317,12 +315,12 @@ def bot_loop():
     while True:
         try:
             active_positions = get_active_positions()
-            active_symbols = list(active_positions.keys())
+            active_symbols = list(active_positions.keys()) if isinstance(active_positions, dict) else []
 
             if active_positions:
                 manage_trailing_stops(active_positions)
 
-            if len(active_positions) < MAX_POSITIONS:
+            if len(active_symbols) < MAX_POSITIONS:
                 candidates = analyze_opportunities(active_symbols)
                 
                 if candidates:
@@ -333,25 +331,27 @@ def bot_loop():
         except Exception as e:
             print(f"[Ana Dongu Hatasi]: {e}")
 
-        # 2 dakikada (120 saniye) bir piyasayı tarar
+        # 2 dakikada bir tarama yapar (Hata olsa dahi döngü durmaz)
         time.sleep(120)
-
-
-threading.Thread(target=bot_loop, daemon=True).start()
 
 
 @app.route('/')
 def home():
     active_positions = get_active_positions()
+    pos_list = list(active_positions.keys()) if isinstance(active_positions, dict) else []
     return jsonify({
         "status": "Bi-Directional Multi-Pair Bot Active (Filtered & Low Risk)",
         "leverage": f"{TARGET_LEVERAGE}x",
         "trailing_stop": f"%{TRAILING_STOP_PERCENT * 100}",
-        "active_positions": list(active_positions.keys()),
-        "active_positions_count": len(active_positions),
+        "active_positions": pos_list,
+        "active_positions_count": len(pos_list),
         "max_allowed": MAX_POSITIONS
     })
 
+
+# Thread'in uygulama başlarken güvenli biçimde başlatılması
+scanner_thread = threading.Thread(target=bot_loop, daemon=True)
+scanner_thread.start()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
