@@ -82,11 +82,10 @@ def set_leverage(symbol, leverage=TARGET_LEVERAGE):
 
 
 def get_klines(symbol, limit=100):
-    # ABD / Coğrafi kısıtlamaları aşmak için engelsiz kamuya açık Binance data endpoint'i
-    url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={INTERVAL}&limit={limit}"
+    url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={INTERVAL}&limit={limit}"
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0'
     }
     
     try:
