@@ -177,8 +177,8 @@ def analyze_opportunities(active_symbols):
 
         closes, volumes = get_klines(symbol)
         
-        # Rate limit (IP Ban) riskini önlemek için her coin isteği arasına nefes payı
-        time.sleep(0.3)
+        # Binance rate limit (IP Ban) riskini tamamen ortadan kaldırmak için güvenli bekleme
+        time.sleep(1.0)
         
         if len(closes) < 30 or len(volumes) < 20:
             print(f"[{symbol}] Yetersiz mum/hacim verisi (Alınan mum sayısı: {len(closes)})")
