@@ -81,14 +81,17 @@ def set_leverage(symbol, leverage=TARGET_LEVERAGE):
     print(f"[{symbol}] Kaldıraç {leverage}x olarak ayarlandı: {res}")
 
 
-def get_klines(symbol, limit=60):
+def get_klines(symbol, limit=100):
     url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={INTERVAL}&limit={limit}"
     try:
-        res = requests.get(url, timeout=10).json()
-        if isinstance(res, list):
+        response = requests.get(url, timeout=10)
+        res = response.json()
+        if isinstance(res, list) and len(res) > 0:
             closes = [float(k[4]) for k in res]
             volumes = [float(k[5]) for k in res]
             return closes, volumes
+        else:
+            print(f"[{symbol}] Klines API beklenmeyen yanıt döndü: {res}")
     except Exception as e:
         print(f"[{symbol}] Klines alma hatası: {e}")
     return [], []
@@ -167,8 +170,10 @@ def analyze_opportunities(active_symbols):
             continue
 
         closes, volumes = get_klines(symbol)
-        if len(closes) < SLOW_EMA_PERIOD + 5 or len(volumes) < VOLUME_MA_PERIOD:
-            print(f"[{symbol}] Yetersiz mum/hacim verisi")
+        
+        # En az 30 mum verisi varsa indikatör hesabı için yeterlidir
+        if len(closes) < 30 or len(volumes) < 20:
+            print(f"[{symbol}] Yetersiz mum/hacim verisi (Alınan mum sayısı: {len(closes)})")
             continue
 
         ema_fast = calculate_ema(closes, FAST_EMA_PERIOD)
@@ -331,7 +336,7 @@ def bot_loop():
         except Exception as e:
             print(f"[Ana Dongu Hatasi]: {e}")
 
-        # 2 dakikada bir tarama yapar (Hata olsa dahi döngü durmaz)
+        # 2 dakikada bir tarama yapar
         time.sleep(120)
 
 
