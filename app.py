@@ -84,14 +84,13 @@ def set_leverage(symbol, leverage=TARGET_LEVERAGE):
 def get_klines(symbol, limit=100):
     url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={INTERVAL}&limit={limit}"
     try:
+        # Public Binance URL'lerine header göndermek bazı durumlarda bloklanabilir
         response = requests.get(url, timeout=10)
         res = response.json()
         if isinstance(res, list) and len(res) > 0:
             closes = [float(k[4]) for k in res]
             volumes = [float(k[5]) for k in res]
             return closes, volumes
-        else:
-            print(f"[{symbol}] Klines API beklenmeyen yanıt döndü: {res}")
     except Exception as e:
         print(f"[{symbol}] Klines alma hatası: {e}")
     return [], []
@@ -171,7 +170,6 @@ def analyze_opportunities(active_symbols):
 
         closes, volumes = get_klines(symbol)
         
-        # En az 30 mum verisi varsa indikatör hesabı için yeterlidir
         if len(closes) < 30 or len(volumes) < 20:
             print(f"[{symbol}] Yetersiz mum/hacim verisi (Alınan mum sayısı: {len(closes)})")
             continue
@@ -180,7 +178,6 @@ def analyze_opportunities(active_symbols):
         ema_slow = calculate_ema(closes, SLOW_EMA_PERIOD)
         current_rsi = calculate_rsi(closes)
 
-        # Hacim Filtresi: Son mum hacmi > Son 20 mum ortalama hacmi
         avg_volume = sum(volumes[-VOLUME_MA_PERIOD:]) / VOLUME_MA_PERIOD
         current_volume = volumes[-1]
         volume_confirmed = current_volume > avg_volume
@@ -336,7 +333,6 @@ def bot_loop():
         except Exception as e:
             print(f"[Ana Dongu Hatasi]: {e}")
 
-        # 2 dakikada bir tarama yapar
         time.sleep(120)
 
 
@@ -354,10 +350,11 @@ def home():
     })
 
 
-# Thread'in uygulama başlarken güvenli biçimde başlatılması
+# Arka plan tarama thread'ini başlat
 scanner_thread = threading.Thread(target=bot_loop, daemon=True)
 scanner_thread.start()
 
+# Render ve Gunicorn için Port Ayarı
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
