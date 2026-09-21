@@ -82,15 +82,23 @@ def set_leverage(symbol, leverage=TARGET_LEVERAGE):
 
 
 def get_klines(symbol, limit=100):
-    url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={INTERVAL}&limit={limit}"
+    # ABD / Coğrafi kısıtlamaları aşmak için engelsiz kamuya açık Binance data endpoint'i
+    url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={INTERVAL}&limit={limit}"
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    
     try:
-        # Public Binance URL'lerine header göndermek bazı durumlarda bloklanabilir
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
         res = response.json()
+
         if isinstance(res, list) and len(res) > 0:
             closes = [float(k[4]) for k in res]
             volumes = [float(k[5]) for k in res]
             return closes, volumes
+        else:
+            print(f"[{symbol}] Klines yanıt hatası: {res}")
     except Exception as e:
         print(f"[{symbol}] Klines alma hatası: {e}")
     return [], []
