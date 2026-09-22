@@ -23,7 +23,7 @@ else:
 INTERVAL = "15m"             # 15 dakikalık grafikler
 TRAILING_STOP_PERCENT = 0.030  # %3.0 Trailing Stop
 MAX_POSITIONS = 7              # En fazla 7 açık pozisyon
-ALLOCATION_PER_TRADE = 0.10    # Bakiyenin %10'u
+ALLOCATION_PER_TRADE = 0.30    # Bakiyenin %30'u (Min 5 USDT kuralını aşmak için güncellendi)
 TARGET_LEVERAGE = 3            # Düşük risk için 3x Kaldıraç
 
 FAST_EMA_PERIOD = 9
@@ -229,14 +229,17 @@ def execute_order(symbol, price, side):
     print(f"[{symbol}] Güncel Futures Bakiyesi: {balance} USDT")
     
     if balance < 5:
-        print(f"[{symbol}] Yetersiz bakiye: {balance} USDT (Lütfen Futures cüzdan bakiyenizi ve API yetkilerinizi kontrol edin)")
+        print(f"[{symbol}] Yetersiz bakiye: {balance} USDT")
         return
 
     set_leverage(symbol, TARGET_LEVERAGE)
 
-    trade_amount_usdt = balance * ALLOCATION_PER_TRADE
-    raw_qty = trade_amount_usdt / price
-    
+    # Kaldıraçlı toplam işlem büyüklüğünün (notional) en az 5 USDT olmasını garantiliyoruz
+    trade_amount_usdt = balance * ALLOCATION_PER_TRADE * TARGET_LEVERAGE
+    if trade_amount_usdt < 5.5:
+        trade_amount_usdt = 5.5  # Minimum sınır güvenliği
+
+    raw_qty = (trade_amount_usdt / TARGET_LEVERAGE) / price
     precision = get_symbol_precision(symbol)
     qty = round(raw_qty, precision)
 
@@ -302,7 +305,7 @@ def manage_trailing_stops(active_positions):
 
 def bot_loop():
     print("Filtreli & Düşük Riskli Çift Yönlü Bot Başlatıldı...")
-    time.sleep(5)  # Başlangıçta sunucunun kendine gelmesi için kısa bir bekleme
+    time.sleep(5)
     while True:
         try:
             print("[Bot Döngüsü] Yeni tur başlatılıyor...")
