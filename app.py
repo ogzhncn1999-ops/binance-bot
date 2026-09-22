@@ -89,14 +89,14 @@ def get_symbol_precision(symbol):
             if s["symbol"] == symbol:
                 for f in s.get("filters", []):
                     if f["filterType"] == "LOT_SIZE":
-                        step_size = float(f["stepSize"])
-                        precision = 0
-                        if "." in str(step_size):
-                            precision = len(str(step_size).rstrip("0").split(".")[1])
-                        return precision
+                        step_size = str(f["stepSize"])
+                        if "." in step_size:
+                            decimal_part = step_size.rstrip("0").split(".")[1]
+                            return len(decimal_part)
+                        return 0
     except Exception as e:
         print(f"[{symbol}] Precision alma hatası: {e}")
-    return 3
+    return 2
 
 
 def get_klines(symbol, limit=100):
