@@ -89,10 +89,13 @@ def get_symbol_precision(symbol):
             if s["symbol"] == symbol:
                 for f in s.get("filters", []):
                     if f["filterType"] == "LOT_SIZE":
-                        step_size = str(f["stepSize"])
+                        step_size = f["stepSize"]
+                        # Bilimsel gösterimi veya ondalık kısmı güvenli şekilde parse etme
+                        if "e-" in step_size:
+                            return int(step_size.split("e-")[1])
                         if "." in step_size:
-                            decimal_part = step_size.rstrip("0").split(".")[1]
-                            return len(decimal_part)
+                            decimal_part = step_size.split(".")[1]
+                            return len(decimal_part.rstrip("0"))
                         return 0
     except Exception as e:
         print(f"[{symbol}] Precision alma hatası: {e}")
