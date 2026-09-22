@@ -22,8 +22,8 @@ else:
 
 INTERVAL = "15m"             # 15 dakikalık grafikler
 TRAILING_STOP_PERCENT = 0.030  # %3.0 Trailing Stop
-MAX_POSITIONS = 7              # En fazla 7 açık pozisyon
-ALLOCATION_PER_TRADE = 0.30    # Bakiyenin %30'u (Min 5 USDT kuralını aşmak için güncellendi)
+MAX_POSITIONS = 3              # Küçük bakiye için maksimum pozisyon sayısını 3'e sınırlandırdık
+ALLOCATION_PER_TRADE = 0.60    # Bakiyenin %60'ı (Min Notional 20 USDT kuralını aşmak için güncellendi)
 TARGET_LEVERAGE = 3            # Düşük risk için 3x Kaldıraç
 
 FAST_EMA_PERIOD = 9
@@ -38,8 +38,8 @@ WATCHLIST = [
     "ATOMUSDT", "ARBUSDT", "OPUSDT", "APTUSDT"
 ]
 
-highest_prices = {}  # Long pozisyonlar için zirve takibi
-lowest_prices = {}   # Short pozisyonlar için dip takibi
+highest_prices = {}  # Long pozisyonlar için zirve takipi
+lowest_prices = {}   # Short pozisyonlar için dip takipi
 
 
 def send_signed_request(method, endpoint, params=None):
@@ -90,7 +90,6 @@ def get_symbol_precision(symbol):
                 for f in s.get("filters", []):
                     if f["filterType"] == "LOT_SIZE":
                         step_size = f["stepSize"]
-                        # Bilimsel gösterimi veya ondalık kısmı güvenli şekilde parse etme
                         if "e-" in step_size:
                             return int(step_size.split("e-")[1])
                         if "." in step_size:
@@ -231,16 +230,16 @@ def execute_order(symbol, price, side):
     balance = get_usdt_balance()
     print(f"[{symbol}] Güncel Futures Bakiyesi: {balance} USDT")
     
-    if balance < 5:
+    if balance < 10:
         print(f"[{symbol}] Yetersiz bakiye: {balance} USDT")
         return
 
     set_leverage(symbol, TARGET_LEVERAGE)
 
-    # Kaldıraçlı toplam işlem büyüklüğünün (notional) en az 5 USDT olmasını garantiliyoruz
+    # Tüm coinlerin min notional (20 USDT) sınırını aşması için güvenli büyüklük
     trade_amount_usdt = balance * ALLOCATION_PER_TRADE * TARGET_LEVERAGE
-    if trade_amount_usdt < 5.5:
-        trade_amount_usdt = 5.5  # Minimum sınır güvenliği
+    if trade_amount_usdt < 22.0:
+        trade_amount_usdt = 22.0
 
     raw_qty = (trade_amount_usdt / TARGET_LEVERAGE) / price
     precision = get_symbol_precision(symbol)
