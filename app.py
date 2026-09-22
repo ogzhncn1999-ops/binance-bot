@@ -22,9 +22,9 @@ else:
 
 INTERVAL = "15m"             # 15 dakikalık grafikler
 TRAILING_STOP_PERCENT = 0.030  # %3.0 Trailing Stop
-MAX_POSITIONS = 3              # Küçük bakiye için maksimum pozisyon sayısını 3'e sınırlandırdık
-ALLOCATION_PER_TRADE = 0.60    # Bakiyenin %60'ı (Min Notional 20 USDT kuralını aşmak için güncellendi)
-TARGET_LEVERAGE = 3            # Düşük risk için 3x Kaldıraç
+MAX_POSITIONS = 3              # Maksimum pozisyon sınırı
+ALLOCATION_PER_TRADE = 0.60    # Bakiyenin %60'ı
+TARGET_LEVERAGE = 3            # 3x Kaldıraç
 
 FAST_EMA_PERIOD = 9
 SLOW_EMA_PERIOD = 21
@@ -38,8 +38,8 @@ WATCHLIST = [
     "ATOMUSDT", "ARBUSDT", "OPUSDT", "APTUSDT"
 ]
 
-highest_prices = {}  # Long pozisyonlar için zirve takipi
-lowest_prices = {}   # Short pozisyonlar için dip takipi
+highest_prices = {}  
+lowest_prices = {}   
 
 
 def send_signed_request(method, endpoint, params=None):
@@ -80,7 +80,8 @@ def set_leverage(symbol, leverage=TARGET_LEVERAGE):
     print(f"[{symbol}] Kaldıraç {leverage}x olarak ayarlandı: {res}")
 
 
-def get_symbol_precision(symbol):
+def get_exchange_rule(symbol):
+    """Binance exchangeInfo üzerinden stepSize ve precision değerini doğrudan çeker."""
     url = f"{BASE_URL}/fapi/v1/exchangeInfo"
     try:
         response = requests.get(url, timeout=10)
@@ -90,15 +91,15 @@ def get_symbol_precision(symbol):
                 for f in s.get("filters", []):
                     if f["filterType"] == "LOT_SIZE":
                         step_size = f["stepSize"]
+                        precision = 0
                         if "e-" in step_size:
-                            return int(step_size.split("e-")[1])
-                        if "." in step_size:
-                            decimal_part = step_size.split(".")[1]
-                            return len(decimal_part.rstrip("0"))
-                        return 0
+                            precision = int(step_size.split("e-")[1])
+                        elif "." in step_size:
+                            precision = len(step_size.split(".")[1].rstrip("0"))
+                        return float(step_size), precision
     except Exception as e:
-        print(f"[{symbol}] Precision alma hatası: {e}")
-    return 2
+        print(f"[{symbol}] Exchange kuralı alma hatası: {e}")
+    return 0.001, 3
 
 
 def get_klines(symbol, limit=100):
@@ -236,14 +237,15 @@ def execute_order(symbol, price, side):
 
     set_leverage(symbol, TARGET_LEVERAGE)
 
-    # Tüm coinlerin min notional (20 USDT) sınırını aşması için güvenli büyüklük
     trade_amount_usdt = balance * ALLOCATION_PER_TRADE * TARGET_LEVERAGE
     if trade_amount_usdt < 22.0:
         trade_amount_usdt = 22.0
 
     raw_qty = (trade_amount_usdt / TARGET_LEVERAGE) / price
-    precision = get_symbol_precision(symbol)
-    qty = round(raw_qty, precision)
+    
+    # Binance stepSize ve precision kurallarına göre miktarı tam oturtma
+    step_size, precision = get_exchange_rule(symbol)
+    qty = round(raw_qty - (raw_qty % step_size), precision)
 
     if qty <= 0:
         print(f"[{symbol}] Miktar çok düşük: {qty}")
