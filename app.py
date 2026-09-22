@@ -20,7 +20,7 @@ if TESTNET:
 else:
     BASE_URL = "https://fapi.binance.com"  # Canlı Binance Futures Endpoint
 
-INTERVAL = "15m"               # 15 dakikalık grafikler
+INTERVAL = "15m"             # 15 dakikalık grafikler
 TRAILING_STOP_PERCENT = 0.030  # %3.0 Trailing Stop
 MAX_POSITIONS = 7              # En fazla 7 açık pozisyon
 ALLOCATION_PER_TRADE = 0.10    # Bakiyenin %10'u
@@ -78,6 +78,25 @@ def set_leverage(symbol, leverage=TARGET_LEVERAGE):
     params = {"symbol": symbol, "leverage": leverage}
     res = send_signed_request("POST", "/fapi/v1/leverage", params)
     print(f"[{symbol}] Kaldıraç {leverage}x olarak ayarlandı: {res}")
+
+
+def get_symbol_precision(symbol):
+    url = f"{BASE_URL}/fapi/v1/exchangeInfo"
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        for s in data.get("symbols", []):
+            if s["symbol"] == symbol:
+                for f in s.get("filters", []):
+                    if f["filterType"] == "LOT_SIZE":
+                        step_size = float(f["stepSize"])
+                        precision = 0
+                        if "." in str(step_size):
+                            precision = len(str(step_size).rstrip("0").split(".")[1])
+                        return precision
+    except Exception as e:
+        print(f"[{symbol}] Precision alma hatası: {e}")
+    return 3
 
 
 def get_klines(symbol, limit=100):
@@ -152,11 +171,9 @@ def get_active_positions():
 
 def get_usdt_balance():
     res = send_signed_request("GET", "/fapi/v2/account")
-    print(f"[DEBUG Bakiye Yaniti]: {res}")  # Binance'den gelen ham yanıtı loglarda göreceğiz
     if isinstance(res, dict) and "assets" in res:
         for asset in res["assets"]:
             if asset.get("asset") == "USDT":
-                # availableBalance veya withdrawAvailable alanlarını kontrol ediyoruz
                 return float(asset.get("availableBalance", 0))
     return 0.0
 
@@ -170,7 +187,7 @@ def analyze_opportunities(active_symbols):
             continue
 
         closes, volumes = get_klines(symbol)
-        time.sleep(1.0)  # Rate limit koruması
+        time.sleep(1.0)
         
         if len(closes) < 30 or len(volumes) < 20:
             continue
@@ -218,10 +235,10 @@ def execute_order(symbol, price, side):
     set_leverage(symbol, TARGET_LEVERAGE)
 
     trade_amount_usdt = balance * ALLOCATION_PER_TRADE
-    qty = round(trade_amount_usdt / price, 3)
-
-    if symbol == "BTCUSDT" and qty < 0.001:
-        qty = 0.001
+    raw_qty = trade_amount_usdt / price
+    
+    precision = get_symbol_precision(symbol)
+    qty = round(raw_qty, precision)
 
     if qty <= 0:
         print(f"[{symbol}] Miktar çok düşük: {qty}")
