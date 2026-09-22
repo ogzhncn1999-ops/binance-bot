@@ -302,8 +302,10 @@ def manage_trailing_stops(active_positions):
 
 def bot_loop():
     print("Filtreli & Düşük Riskli Çift Yönlü Bot Başlatıldı...")
+    time.sleep(5)  # Başlangıçta sunucunun kendine gelmesi için kısa bir bekleme
     while True:
         try:
+            print("[Bot Döngüsü] Yeni tur başlatılıyor...")
             active_positions = get_active_positions()
             active_symbols = list(active_positions.keys()) if isinstance(active_positions, dict) else []
 
@@ -317,10 +319,13 @@ def bot_loop():
                     top_candidate = candidates[0]
                     print(f"[{top_candidate['symbol']}] FİLTRELİ SİNYAL ONAYLANDI! Yön: {top_candidate['side']} İşlem Yapılıyor...")
                     execute_order(top_candidate['symbol'], top_candidate['price'], top_candidate['side'])
+            else:
+                print(f"[Bot Döngüsü] Maksimum pozisyon sınırına ulaşıldı ({len(active_symbols)}/{MAX_POSITIONS}).")
 
         except Exception as e:
             print(f"[Ana Dongu Hatasi]: {e}")
 
+        print("[Bot Döngüsü] Tur tamamlandı, 120 saniye bekleniyor...\n")
         time.sleep(120)
 
 
