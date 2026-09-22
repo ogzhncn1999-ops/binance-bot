@@ -96,10 +96,10 @@ def get_exchange_rule(symbol):
                             precision = int(step_size.split("e-")[1])
                         elif "." in step_size:
                             precision = len(step_size.split(".")[1].rstrip("0"))
-                        return float(step_size), precision
+                        return step_size, precision
     except Exception as e:
         print(f"[{symbol}] Exchange kuralı alma hatası: {e}")
-    return 0.001, 3
+    return "0.01", 2
 
 
 def get_klines(symbol, limit=100):
@@ -243,9 +243,10 @@ def execute_order(symbol, price, side):
 
     raw_qty = (trade_amount_usdt / TARGET_LEVERAGE) / price
     
-    # Binance stepSize ve precision kurallarına göre miktarı tam oturtma
-    step_size, precision = get_exchange_rule(symbol)
-    qty = round(raw_qty - (raw_qty % step_size), precision)
+    # Binance stepSize ve precision formatına string tabanlı kusursuz uyarlama
+    _, precision = get_exchange_rule(symbol)
+    qty_str = f"{raw_qty:.{precision}f}"
+    qty = float(qty_str)
 
     if qty <= 0:
         print(f"[{symbol}] Miktar çok düşük: {qty}")
