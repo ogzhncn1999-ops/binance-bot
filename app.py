@@ -5,7 +5,7 @@ import hashlib
 import urllib.parse
 import threading
 import requests
-from flask import Flask, jsonify
+from flask import Flask, render_template_string
 
 app = Flask(__name__)
 
@@ -18,13 +18,13 @@ TESTNET = os.environ.get("TESTNET", "False").lower() == "true"
 if TESTNET:
     BASE_URL = "https://testnet.binancefuture.com"
 else:
-    BASE_URL = "https://fapi.binance.com"  # Canlı Binance Futures Endpoint
+    BASE_URL = "https://fapi.binance.com"
 
-INTERVAL = "15m"             # 15 dakikalık grafikler
-TRAILING_STOP_PERCENT = 0.030  # %3.0 Trailing Stop
-MAX_POSITIONS = 3              # Maksimum pozisyon sınırı
-ALLOCATION_PER_TRADE = 0.60    # Bakiyenin %60'ı
-TARGET_LEVERAGE = 3            # 3x Kaldıraç
+INTERVAL = "15m"
+TRAILING_STOP_PERCENT = 0.030
+MAX_POSITIONS = 3
+ALLOCATION_PER_TRADE = 0.60
+TARGET_LEVERAGE = 3
 
 FAST_EMA_PERIOD = 9
 SLOW_EMA_PERIOD = 21
@@ -76,12 +76,10 @@ def send_signed_request(method, endpoint, params=None):
 
 def set_leverage(symbol, leverage=TARGET_LEVERAGE):
     params = {"symbol": symbol, "leverage": leverage}
-    res = send_signed_request("POST", "/fapi/v1/leverage", params)
-    print(f"[{symbol}] Kaldıraç {leverage}x olarak ayarlandı: {res}")
+    send_signed_request("POST", "/fapi/v1/leverage", params)
 
 
 def get_exchange_rule(symbol):
-    """Binance exchangeInfo üzerinden stepSize ve precision değerini doğrudan çeker."""
     url = f"{BASE_URL}/fapi/v1/exchangeInfo"
     try:
         response = requests.get(url, timeout=10)
@@ -154,21 +152,40 @@ def calculate_rsi(prices, period=RSI_PERIOD):
     return round(100 - (100 / (1 + rs)), 2)
 
 
-def get_active_positions():
+def get_detailed_positions():
     res = send_signed_request("GET", "/fapi/v2/positionRisk")
-    active = {}
+    positions = []
     if isinstance(res, list):
         for pos in res:
             amt = float(pos.get("positionAmt", 0))
             if amt != 0:
                 symbol = pos.get("symbol")
                 entry_price = float(pos.get("entryPrice", 0))
+                mark_price = float(pos.get("markPrice", 0))
+                unrealized_pnl = float(pos.get("unRealizedProfit", 0))
                 side = "LONG" if amt > 0 else "SHORT"
-                active[symbol] = {
+                leverage = pos.get("leverage", TARGET_LEVERAGE)
+                positions.append({
+                    "symbol": symbol,
+                    "side": side,
                     "amount": amt,
                     "entry_price": entry_price,
-                    "side": side
-                }
+                    "mark_price": mark_price,
+                    "unrealized_pnl": round(unrealized_pnl, 2),
+                    "leverage": leverage
+                })
+    return positions
+
+
+def get_active_positions():
+    pos_list = get_detailed_positions()
+    active = {}
+    for p in pos_list:
+        active[p["symbol"]] = {
+            "amount": p["amount"],
+            "entry_price": p["entry_price"],
+            "side": p["side"]
+        }
     return active
 
 
@@ -177,14 +194,12 @@ def get_usdt_balance():
     if isinstance(res, dict) and "assets" in res:
         for asset in res["assets"]:
             if asset.get("asset") == "USDT":
-                return float(asset.get("availableBalance", 0))
-    return 0.0
+                return float(asset.get("availableBalance", 0)), float(asset.get("totalWalletBalance", 0))
+    return 0.0, 0.0
 
 
 def analyze_opportunities(active_symbols):
     candidates = []
-    print(f"\n--- Çift Yönlü Market Taraması (Filtreli) ({len(WATCHLIST) - len(active_symbols)} coin taranıyor) ---")
-    
     for symbol in WATCHLIST:
         if symbol in active_symbols:
             continue
@@ -215,12 +230,10 @@ def analyze_opportunities(active_symbols):
 
         if (is_long_cross or is_long_trend) and current_rsi < 65 and volume_confirmed:
             score = abs((last_fast - last_slow) / last_slow) * 100
-            print(f"[{symbol}] 🚀 LONG ONAYLANDI! Fiyat: {current_price} | RSI: {current_rsi} < 65 | Hacim: ONAYLI")
             candidates.append({"symbol": symbol, "price": current_price, "side": "BUY", "score": score})
 
         elif (is_short_cross or is_short_trend) and current_rsi > 35 and volume_confirmed:
             score = abs((last_fast - last_slow) / last_slow) * 100
-            print(f"[{symbol}] 🔻 SHORT ONAYLANDI! Fiyat: {current_price} | RSI: {current_rsi} > 35 | Hacim: ONAYLI")
             candidates.append({"symbol": symbol, "price": current_price, "side": "SELL", "score": score})
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -228,28 +241,22 @@ def analyze_opportunities(active_symbols):
 
 
 def execute_order(symbol, price, side):
-    balance = get_usdt_balance()
-    print(f"[{symbol}] Güncel Futures Bakiyesi: {balance} USDT")
-    
-    if balance < 10:
-        print(f"[{symbol}] Yetersiz bakiye: {balance} USDT")
+    avail_balance, _ = get_usdt_balance()
+    if avail_balance < 10:
         return
 
     set_leverage(symbol, TARGET_LEVERAGE)
 
-    trade_amount_usdt = balance * ALLOCATION_PER_TRADE * TARGET_LEVERAGE
+    trade_amount_usdt = avail_balance * ALLOCATION_PER_TRADE * TARGET_LEVERAGE
     if trade_amount_usdt < 22.0:
         trade_amount_usdt = 22.0
 
     raw_qty = (trade_amount_usdt / TARGET_LEVERAGE) / price
-    
-    # Binance stepSize ve precision formatına string tabanlı kusursuz uyarlama
     _, precision = get_exchange_rule(symbol)
     qty_str = f"{raw_qty:.{precision}f}"
     qty = float(qty_str)
 
     if qty <= 0:
-        print(f"[{symbol}] Miktar çok düşük: {qty}")
         return
 
     params = {
@@ -258,9 +265,7 @@ def execute_order(symbol, price, side):
         "type": "MARKET",
         "quantity": qty
     }
-    
-    res = send_signed_request("POST", "/fapi/v1/order", params)
-    print(f"[{symbol}] {side} Emir Sonucu: {res}")
+    send_signed_request("POST", "/fapi/v1/order", params)
     
     if side == "BUY":
         highest_prices[symbol] = price
@@ -285,10 +290,8 @@ def manage_trailing_stops(active_positions):
 
             stop_price = highest_prices[symbol] * (1 - TRAILING_STOP_PERCENT)
             if current_price <= stop_price:
-                print(f"[{symbol}] 🛑 LONG TRAILING STOP TETİKLENDİ!")
                 params = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": abs(pos_data["amount"]), "reduceOnly": "true"}
-                res = send_signed_request("POST", "/fapi/v1/order", params)
-                print(f"[{symbol}] Sonuç: {res}")
+                send_signed_request("POST", "/fapi/v1/order", params)
                 if symbol in highest_prices:
                     del highest_prices[symbol]
 
@@ -300,20 +303,16 @@ def manage_trailing_stops(active_positions):
 
             stop_price = lowest_prices[symbol] * (1 + TRAILING_STOP_PERCENT)
             if current_price >= stop_price:
-                print(f"[{symbol}] 🛑 SHORT TRAILING STOP TETİKLENDİ!")
                 params = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quantity": abs(pos_data["amount"]), "reduceOnly": "true"}
-                res = send_signed_request("POST", "/fapi/v1/order", params)
-                print(f"[{symbol}] Sonuç: {res}")
+                send_signed_request("POST", "/fapi/v1/order", params)
                 if symbol in lowest_prices:
                     del lowest_prices[symbol]
 
 
 def bot_loop():
-    print("Filtreli & Düşük Riskli Çift Yönlü Bot Başlatıldı...")
     time.sleep(5)
     while True:
         try:
-            print("[Bot Döngüsü] Yeni tur başlatılıyor...")
             active_positions = get_active_positions()
             active_symbols = list(active_positions.keys()) if isinstance(active_positions, dict) else []
 
@@ -322,30 +321,106 @@ def bot_loop():
 
             if len(active_symbols) < MAX_POSITIONS:
                 candidates = analyze_opportunities(active_symbols)
-                
                 if candidates:
                     top_candidate = candidates[0]
-                    print(f"[{top_candidate['symbol']}] FİLTRELİ SİNYAL ONAYLANDI! Yön: {top_candidate['side']} İşlem Yapılıyor...")
                     execute_order(top_candidate['symbol'], top_candidate['price'], top_candidate['side'])
-            else:
-                print(f"[Bot Döngüsü] Maksimum pozisyon sınırına ulaşıldı ({len(active_symbols)}/{MAX_POSITIONS}).")
-
         except Exception as e:
             print(f"[Ana Dongu Hatasi]: {e}")
 
-        print("[Bot Döngüsü] Tur tamamlandı, 120 saniye bekleniyor...\n")
         time.sleep(120)
 
 
+DASHBOARD_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>Binance Bot Canlı Takip</title>
+    <meta http-equiv="refresh" content="30">
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }
+        .container { max-width: 900px; margin: auto; background: #161b22; padding: 20px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        h1 { color: #58a6ff; text-align: center; }
+        .stats { display: flex; justify-content: space-around; background: #21262d; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .stat-box { text-align: center; }
+        .stat-value { font-size: 20px; font-weight: bold; color: #f0f6fc; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { padding: 12px; text-align: center; border-bottom: 1px solid #30363d; }
+        th { background-color: #21262d; color: #8b949e; }
+        .long { color: #3fb950; font-weight: bold; }
+        .short { color: #f85149; font-weight: bold; }
+        .profit { color: #3fb950; font-weight: bold; }
+        .loss { color: #f85149; font-weight: bold; }
+        .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #8b949e; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Binance Otomatik İşlem & PNL Takip Paneli</h1>
+        <div class="stats">
+            <div class="stat-box">
+                <div>Kullanılabilir Bakiye</div>
+                <div class="stat-value">{{ avail_balance }} USDT</div>
+            </div>
+            <div class="stat-box">
+                <div>Toplam Cüzdan</div>
+                <div class="stat-value">{{ total_balance }} USDT</div>
+            </div>
+            <div class="stat-box">
+                <div>Açık Pozisyon Sayısı</div>
+                <div class="stat-value">{{ positions|length }} / 3</div>
+            </div>
+        </div>
+
+        <h2>📊 Açık Pozisyonlar ve Kâr/Zarar (PNL)</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Sembol</th>
+                    <th>Yön</th>
+                    <th>Kaldıraç</th>
+                    <th>Giriş Fiyatı</th>
+                    <th>Anlık Fiyat</th>
+                    <th>Anlık PNL (USDT)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if positions %}
+                    {% for p in positions %}
+                    <tr>
+                        <td><b>{{ p.symbol }}</b></td>
+                        <td class="{{ 'long' if p.side == 'LONG' else 'short' }}">{{ p.side }}</td>
+                        <td>{{ p.leverage }}x</td>
+                        <td>{{ p.entry_price }}</td>
+                        <td>{{ p.mark_price }}</td>
+                        <td class="{{ 'profit' if p.unrealized_pnl >= 0 else 'loss' }}">
+                            {{ '+' if p.unrealized_pnl > 0 else '' }}{{ p.unrealized_pnl }} USDT
+                        </td>
+                    </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr>
+                        <td colspan="6" style="color: #8b949e;">Şu anda açık pozisyon bulunmuyor. Bot sinyal bekliyor...</td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+        <div class="footer">Sayfa her 30 saniyede bir otomatik yenilenir.</div>
+    </div>
+</body>
+</html>
+"""
+
 @app.route('/')
 def home():
-    active_positions = get_active_positions()
-    pos_list = list(active_positions.keys()) if isinstance(active_positions, dict) else []
-    return jsonify({
-        "status": "Bi-Directional Multi-Pair Bot Active",
-        "leverage": f"{TARGET_LEVERAGE}x",
-        "active_positions": pos_list
-    })
+    avail, total = get_usdt_balance()
+    positions = get_detailed_positions()
+    return render_template_string(
+        DASHBOARD_TEMPLATE, 
+        avail_balance=round(avail, 2), 
+        total_balance=round(total, 2), 
+        positions=positions
+    )
 
 
 scanner_thread = threading.Thread(target=bot_loop, daemon=True)
