@@ -25,7 +25,9 @@ SYMBOLS = [
 INTERVAL = "1h"          # 1 saatlik mum aralığı
 LEVERAGE = 3             # Kaldıraç oranı
 TRADE_USDT = 10.0        # Her işlem için ayrılacak marjin (USDT)
-TRAILING_STOP_PCT = 0.03 # %3 İz Süren Stop
+
+# Sembollerin hassasiyet bilgilerini (quantityPrecision) tutmak için sözlük
+symbol_precisions = {}
 
 def log(message):
     timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
@@ -59,6 +61,21 @@ def send_signed_request(http_method, url_path, payload={}):
 
 def true_url_format(params):
     return {k: v for k, v in params.items() if v is not None}
+
+def load_exchange_info():
+    """Binance'ten her coin için izin verilen miktar hassasiyetini (precision) çeker."""
+    global symbol_precisions
+    url = f"{BASE_URL}/fapi/v1/exchangeInfo"
+    try:
+        res = requests.get(url).json()
+        if 'symbols' in res:
+            for s in res['symbols']:
+                sym = s['symbol']
+                precision = s['quantityPrecision']
+                symbol_precisions[sym] = precision
+            log("Binance sembol hassasiyet bilgileri başarıyla yüklendi.")
+    except Exception as e:
+        log(f"ExchangeInfo Yükleme Hatası: {e}")
 
 def set_leverage(symbol):
     url_path = "/fapi/v1/leverage"
@@ -97,18 +114,24 @@ def get_position(symbol):
     return None
 
 def open_order(symbol, side, qty):
+    # Hassasiyet değerini kontrol et, yoksa varsayılan 3 al
+    precision = symbol_precisions.get(symbol, 3)
+    formatted_qty = f"{qty:.{precision}f}"
+    
     url_path = "/fapi/v1/order"
     params = {
         "symbol": symbol,
         "side": side,
         "type": "MARKET",
-        "quantity": qty
+        "quantity": formatted_qty
     }
     res = send_signed_request('POST', url_path, params)
-    log(f"Yeni İşlem Açıldı [{symbol} - {side}]: {res}")
+    log(f"Yeni İşlem Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
 
 def trading_bot_loop():
     log("Binance Bot (1 Saatlik Strateji) Arka Planda Başlatıldı.")
+    load_exchange_info()
+    
     while True:
         try:
             for symbol in SYMBOLS:
@@ -127,15 +150,15 @@ def trading_bot_loop():
                 if current_position:
                     pass
                 else:
-                    qty = round((TRADE_USDT * LEVERAGE) / current_price, 3)
-                    if qty <= 0:
+                    raw_qty = (TRADE_USDT * LEVERAGE) / current_price
+                    if raw_qty <= 0:
                         continue
                         
                     set_leverage(symbol)
                     if ema9 > ema21:
-                        open_order(symbol, "BUY", qty)
+                        open_order(symbol, "BUY", raw_qty)
                     elif ema9 < ema21:
-                        open_order(symbol, "SELL", qty)
+                        open_order(symbol, "SELL", raw_qty)
                         
             time.sleep(300) # 5 dakikada bir piyasayı tara
         except Exception as e:
@@ -151,4 +174,4 @@ if __name__ == '__main__':
     t.daemon = True
     t.start()
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port
