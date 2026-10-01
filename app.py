@@ -16,7 +16,7 @@ TESTNET = os.environ.get('TESTNET', 'False').lower() == 'true'
 
 BASE_URL = "https://testnet.binancevision.com" if TESTNET else "https://fapi.binance.com"
 
-# --- STRATEJİ VE BOT AYARLARI ---
+# --- STRATEJİ VE RİSK YÖNETİMİ AYARLARI ---
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", 
     "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT", 
@@ -25,6 +25,10 @@ SYMBOLS = [
 INTERVAL = "1h"          # 1 saatlik mum aralığı
 LEVERAGE = 3             # Kaldıraç oranı
 TRADE_USDT = 10.0        # Her işlem için ayrılacak marjin (USDT)
+
+# Risk Yönetimi Limitleri (%)
+STOP_LOSS_PCT = 0.025    # %2.5 fiyat değişiminde zarar kes (Stop-Loss)
+TAKE_PROFIT_PCT = 0.05   # %5 fiyat değişiminde kâr al (Take-Profit)
 
 symbol_precisions = {}
 
@@ -101,16 +105,35 @@ def calculate_ema(data, period):
         ema = (price - ema) * multiplier + ema
     return ema
 
-def get_position(symbol):
+def calculate_rsi(data, period=14):
+    if len(data) < period + 1:
+        return 50.0
+    deltas = [data[i] - data[i-1] for i in range(1, len(data))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+    
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    
+    for i in range(period, len(deltas)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi
+
+def get_all_positions():
     url_path = "/fapi/v2/positionRisk"
     res = send_signed_request('GET', url_path)
+    active_positions = []
     if isinstance(res, list):
         for pos in res:
-            if pos['symbol'] == symbol:
-                amt = float(pos['positionAmt'])
-                if amt != 0:
-                    return pos
-    return None
+            if float(pos['positionAmt']) != 0:
+                active_positions.append(pos)
+    return active_positions
 
 def get_balance():
     url_path = "/fapi/v2/account"
@@ -120,6 +143,19 @@ def get_balance():
             if asset['asset'] == 'USDT':
                 return float(asset['walletBalance']), float(asset['availableBalance'])
     return 0.0, 0.0
+
+def close_position(symbol, pos_amt):
+    side = "SELL" if float(pos_amt) > 0 else "BUY"
+    qty = str(abs(float(pos_amt)))
+    url_path = "/fapi/v1/order"
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": "MARKET",
+        "quantity": qty
+    }
+    res = send_signed_request('POST', url_path, params)
+    log(f"Risk Yönetimi Kapatma İşlemi [{symbol}]: {res}")
 
 def open_order(symbol, side, qty):
     precision = symbol_precisions.get(symbol, 3)
@@ -133,55 +169,77 @@ def open_order(symbol, side, qty):
         "quantity": formatted_qty
     }
     res = send_signed_request('POST', url_path, params)
-    log(f"En İyi Fırsat İşleme Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
+    log(f"Filtrelenmiş Yeni İşlem [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
 
 def trading_bot_loop():
-    log("Binance Akıllı Trend Botu Başlatıldı.")
+    log("Gelişmiş Filtreli Binance Bot Başlatıldı.")
     load_exchange_info()
     
     while True:
         try:
+            # 1. Adım: Mevcut pozisyonları kontrol et (Stop-Loss / Take-Profit yönetimi)
+            active_positions = get_all_positions()
+            active_symbols = [p['symbol'] for p in active_positions]
+            
+            for pos in active_positions:
+                symbol = pos['symbol']
+                entry_price = float(pos['entryPrice'])
+                pos_amt = float(pos['positionAmt'])
+                current_price = float(pos['markPrice'])
+                
+                # Yüzdesel değişim hesaplama
+                if pos_amt > 0:  # Long pozisyon
+                    pnl_pct = (current_price - entry_price) / entry_price
+                else:  # Short pozisyon
+                    pnl_pct = (entry_price - current_price) / entry_price
+                
+                # Zarar kes veya kâr al tetikleyicileri
+                if pnl_pct <= -STOP_LOSS_PCT:
+                    log(f"Stop-Loss Tetiklendi! [{symbol}] - Zarar oranı: {pnl_pct*100:.2f}%")
+                    close_position(symbol, pos_amt)
+                elif pnl_pct >= TAKE_PROFIT_PCT:
+                    log(f"Kâr Al Tetiklendi! [{symbol}] - Kâr oranı: {pnl_pct*100:.2f}%")
+                    close_position(symbol, pos_amt)
+
+            # 2. Adım: Yeni sinyaller için tarama yap
             potential_signals = []
             
-            # 1. Adım: Tüm coinleri tara ve sinyalleri topla
             for symbol in SYMBOLS:
-                closes = get_klines(symbol, INTERVAL, limit=30)
-                if not closes or len(closes) < 21:
+                if symbol in active_symbols:
+                    continue  # Zaten açık pozisyon varsa geç
+                
+                closes = get_klines(symbol, INTERVAL, limit=40)
+                if not closes or len(closes) < 25:
                     continue
                 
                 ema9 = calculate_ema(closes, 9)
                 ema21 = calculate_ema(closes, 21)
+                rsi = calculate_rsi(closes, 14)
+                
                 if not ema9 or not ema21:
                     continue
                 
-                # Zaten açık pozisyon varsa bu coini atla
-                if get_position(symbol):
-                    continue
-                
                 current_price = closes[-1]
-                
-                # Trend Gücü Hesaplama (EMA farkının fiyata oranı - potansiyel güç skoru)
                 trend_strength = abs(ema9 - ema21) / current_price
-                side = "BUY" if ema9 > ema21 else "SELL"
                 
-                potential_signals.append({
-                    "symbol": symbol,
-                    "side": side,
-                    "strength": trend_strength,
-                    "price": current_price
-                })
+                # Filtreli Sinyal Mantığı (RSI Filtresi ile desteklenmiş)
+                if ema9 > ema21 and rsi < 65:  # Aşırı alım bölgesinde Long açma
+                    potential_signals.append({
+                        "symbol": symbol, "side": "BUY", "strength": trend_strength, "price": current_price
+                    })
+                elif ema9 < ema21 and rsi > 35:  # Aşırı satım bölgesinde Short açma
+                    potential_signals.append({
+                        "symbol": symbol, "side": "SELL", "strength": trend_strength, "price": current_price
+                    })
             
-            # 2. Adım: Sinyalleri trend gücüne (kâr potansiyeline) göre en yüksekten en düşüğe sırala
+            # Sinyalleri trend gücüne göre sırala
             potential_signals.sort(key=lambda x: x['strength'], reverse=True)
             
-            # 3. Adım: Cüzdan bakiyesini kontrol et ve en güçlü sinyallere işlem aç
+            # Bütçe kontrolü ve işlem açma
             wallet_balance, available_balance = get_balance()
             
             for signal in potential_signals:
-                required_margin = TRADE_USDT
-                
-                # Eğer kullanılabilir bakiye bu işlem için yetiyorsa aç
-                if available_balance >= required_margin:
+                if available_balance >= TRADE_USDT:
                     symbol = signal['symbol']
                     side = signal['side']
                     current_price = signal['price']
@@ -190,20 +248,18 @@ def trading_bot_loop():
                     if raw_qty > 0:
                         set_leverage(symbol)
                         open_order(symbol, side, raw_qty)
-                        # Anlık simüle edilmiş bakiye güncellemesi (diğer döngü içi kontroller için)
-                        available_balance -= required_margin
+                        available_balance -= TRADE_USDT
                 else:
-                    # Bakiye kalmadıysa diğer zayıf sinyalleri geç
                     break
                         
-            time.sleep(300) # 5 dakikada bir piyasayı yeniden tarat
+            time.sleep(300) # 5 dakikada bir döngüyü tekrarla
         except Exception as e:
             log(f"Bot Döngü Hatası: {e}")
             time.sleep(60)
 
 @app.route('/')
 def index():
-    return "Binance Akıllı Trend Botu Aktif ve Çalışıyor."
+    return "Gelişmiş Filtreli Binance Bot Aktif ve Çalışıyor."
 
 if __name__ == '__main__':
     t = Thread(target=trading_bot_loop)
