@@ -27,8 +27,8 @@ LEVERAGE = 3             # Kaldıraç oranı
 TRADE_USDT = 10.0        # Her işlem için ayrılacak marjin (USDT)
 
 # Risk Yönetimi Limitleri (%)
-STOP_LOSS_PCT = 0.025    # %2.5 fiyat değişiminde zarar kes (Stop-Loss)
-TAKE_PROFIT_PCT = 0.05   # %5 fiyat değişiminde kâr al (Take-Profit)
+STOP_LOSS_PCT = 0.025    # %2.5 zarar kes
+TAKE_PROFIT_PCT = 0.05   # %5 kâr al
 
 symbol_precisions = {}
 
@@ -73,7 +73,7 @@ def load_exchange_info():
         if 'symbols' in res:
             for s in res['symbols']:
                 sym = s['symbol']
-                precision = s['quantityPrecision']
+                precision = int(s['quantityPrecision'])
                 symbol_precisions[sym] = precision
             log("Binance sembol hassasiyet bilgileri başarıyla yüklendi.")
     except Exception as e:
@@ -146,7 +146,9 @@ def get_balance():
 
 def close_position(symbol, pos_amt):
     side = "SELL" if float(pos_amt) > 0 else "BUY"
-    qty = str(abs(float(pos_amt)))
+    precision = symbol_precisions.get(symbol, 0)
+    qty = f"{abs(float(pos_amt)):.{precision}f}"
+    
     url_path = "/fapi/v1/order"
     params = {
         "symbol": symbol,
@@ -158,7 +160,8 @@ def close_position(symbol, pos_amt):
     log(f"Risk Yönetimi Kapatma İşlemi [{symbol}]: {res}")
 
 def open_order(symbol, side, qty):
-    precision = symbol_precisions.get(symbol, 3)
+    # Eğer sembol hassasiyeti bulunamazsa güvenli olması için 0 (tam sayı) al
+    precision = symbol_precisions.get(symbol, 0)
     formatted_qty = f"{qty:.{precision}f}"
     
     url_path = "/fapi/v1/order"
@@ -177,7 +180,6 @@ def trading_bot_loop():
     
     while True:
         try:
-            # 1. Adım: Mevcut pozisyonları kontrol et (Stop-Loss / Take-Profit yönetimi)
             active_positions = get_all_positions()
             active_symbols = [p['symbol'] for p in active_positions]
             
@@ -187,13 +189,11 @@ def trading_bot_loop():
                 pos_amt = float(pos['positionAmt'])
                 current_price = float(pos['markPrice'])
                 
-                # Yüzdesel değişim hesaplama
-                if pos_amt > 0:  # Long pozisyon
+                if pos_amt > 0:
                     pnl_pct = (current_price - entry_price) / entry_price
-                else:  # Short pozisyon
+                else:
                     pnl_pct = (entry_price - current_price) / entry_price
                 
-                # Zarar kes veya kâr al tetikleyicileri
                 if pnl_pct <= -STOP_LOSS_PCT:
                     log(f"Stop-Loss Tetiklendi! [{symbol}] - Zarar oranı: {pnl_pct*100:.2f}%")
                     close_position(symbol, pos_amt)
@@ -201,12 +201,11 @@ def trading_bot_loop():
                     log(f"Kâr Al Tetiklendi! [{symbol}] - Kâr oranı: {pnl_pct*100:.2f}%")
                     close_position(symbol, pos_amt)
 
-            # 2. Adım: Yeni sinyaller için tarama yap
             potential_signals = []
             
             for symbol in SYMBOLS:
                 if symbol in active_symbols:
-                    continue  # Zaten açık pozisyon varsa geç
+                    continue
                 
                 closes = get_klines(symbol, INTERVAL, limit=40)
                 if not closes or len(closes) < 25:
@@ -222,20 +221,17 @@ def trading_bot_loop():
                 current_price = closes[-1]
                 trend_strength = abs(ema9 - ema21) / current_price
                 
-                # Filtreli Sinyal Mantığı (RSI Filtresi ile desteklenmiş)
-                if ema9 > ema21 and rsi < 65:  # Aşırı alım bölgesinde Long açma
+                if ema9 > ema21 and rsi < 65:
                     potential_signals.append({
                         "symbol": symbol, "side": "BUY", "strength": trend_strength, "price": current_price
                     })
-                elif ema9 < ema21 and rsi > 35:  # Aşırı satım bölgesinde Short açma
+                elif ema9 < ema21 and rsi > 35:
                     potential_signals.append({
                         "symbol": symbol, "side": "SELL", "strength": trend_strength, "price": current_price
                     })
             
-            # Sinyalleri trend gücüne göre sırala
             potential_signals.sort(key=lambda x: x['strength'], reverse=True)
             
-            # Bütçe kontrolü ve işlem açma
             wallet_balance, available_balance = get_balance()
             
             for signal in potential_signals:
@@ -252,7 +248,7 @@ def trading_bot_loop():
                 else:
                     break
                         
-            time.sleep(300) # 5 dakikada bir döngüyü tekrarla
+            time.sleep(300)
         except Exception as e:
             log(f"Bot Döngü Hatası: {e}")
             time.sleep(60)
