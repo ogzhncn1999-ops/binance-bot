@@ -84,7 +84,7 @@ def set_leverage(symbol):
     params = {"symbol": symbol, "leverage": LEVERAGE}
     send_signed_request('POST', url_path, params)
 
-def get_klines(symbol, interval, limit=50):
+def get_klines(symbol, interval, limit=60):
     url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
         res = requests.get(url).json()
@@ -160,7 +160,6 @@ def close_position(symbol, pos_amt):
     log(f"Risk Yönetimi Kapatma İşlemi [{symbol}]: {res}")
 
 def open_order(symbol, side, qty):
-    # Eğer sembol hassasiyeti bulunamazsa güvenli olması için 0 (tam sayı) al
     precision = symbol_precisions.get(symbol, 0)
     formatted_qty = f"{qty:.{precision}f}"
     
@@ -172,10 +171,10 @@ def open_order(symbol, side, qty):
         "quantity": formatted_qty
     }
     res = send_signed_request('POST', url_path, params)
-    log(f"Filtrelenmiş Yeni İşlem [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
+    log(f"Güçlü Analiz İşlemi Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
 
 def trading_bot_loop():
-    log("Gelişmiş Filtreli Binance Bot Başlatıldı.")
+    log("Gelişmiş Analiz Motorlu Binance Bot Başlatıldı.")
     load_exchange_info()
     
     while True:
@@ -183,6 +182,7 @@ def trading_bot_loop():
             active_positions = get_all_positions()
             active_symbols = [p['symbol'] for p in active_positions]
             
+            # 1. Adım: Mevcut pozisyonların Stop-Loss ve Take-Profit kontrolleri
             for pos in active_positions:
                 symbol = pos['symbol']
                 entry_price = float(pos['entryPrice'])
@@ -201,35 +201,46 @@ def trading_bot_loop():
                     log(f"Kâr Al Tetiklendi! [{symbol}] - Kâr oranı: {pnl_pct*100:.2f}%")
                     close_position(symbol, pos_amt)
 
+            # 2. Adım: Gelişmiş Analiz ve Sinyal Filtreleme
             potential_signals = []
             
             for symbol in SYMBOLS:
                 if symbol in active_symbols:
                     continue
                 
-                closes = get_klines(symbol, INTERVAL, limit=40)
-                if not closes or len(closes) < 25:
+                closes = get_klines(symbol, INTERVAL, limit=50)
+                if not closes or len(closes) < 30:
                     continue
                 
                 ema9 = calculate_ema(closes, 9)
                 ema21 = calculate_ema(closes, 21)
+                ema50 = calculate_ema(closes, 50)  # Ana trend filtresi için 50 EMA
                 rsi = calculate_rsi(closes, 14)
                 
-                if not ema9 or not ema21:
+                if not ema9 or not ema21 or not ema50:
                     continue
                 
                 current_price = closes[-1]
+                
+                # GELİŞMİŞ ANALİZ FİLTRELERİ:
+                # 1. Trend Gücü (EMA 9 ve 21 arasındaki mesafe yüzdesi)
                 trend_strength = abs(ema9 - ema21) / current_price
                 
-                if ema9 > ema21 and rsi < 65:
+                # 2. Yön Filtresi (Fiyat ve EMA50 uyumu): Fiyat EMA50'nin üzerindeyse ana trend YUKARI, altındaysa AŞAĞI kabul edilir.
+                is_uptrend = current_price > ema50 and ema9 > ema21
+                is_downtrend = current_price < ema50 and ema9 < ema21
+                
+                # Sadece ana trendle uyumlu ve RSI sınırları içinde kalan net fırsatları al
+                if is_uptrend and 45 < rsi < 70:  # Boğa piyasasında sağlıklı Long
                     potential_signals.append({
                         "symbol": symbol, "side": "BUY", "strength": trend_strength, "price": current_price
                     })
-                elif ema9 < ema21 and rsi > 35:
+                elif is_downtrend and 30 < rsi < 55:  # Ayı piyasasında sağlıklı Short
                     potential_signals.append({
                         "symbol": symbol, "side": "SELL", "strength": trend_strength, "price": current_price
                     })
             
+            # Analiz puanına (trend gücüne) göre sırala
             potential_signals.sort(key=lambda x: x['strength'], reverse=True)
             
             wallet_balance, available_balance = get_balance()
@@ -255,7 +266,7 @@ def trading_bot_loop():
 
 @app.route('/')
 def index():
-    return "Gelişmiş Filtreli Binance Bot Aktif ve Çalışıyor."
+    return "Gelişmiş Analiz Motorlu Binance Bot Aktif ve Çalışıyor."
 
 if __name__ == '__main__':
     t = Thread(target=trading_bot_loop)
