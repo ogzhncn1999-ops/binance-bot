@@ -144,10 +144,17 @@ def get_balance():
                 return float(asset['walletBalance']), float(asset['availableBalance'])
     return 0.0, 0.0
 
+def format_qty(symbol, amount):
+    precision = symbol_precisions.get(symbol, 3)
+    formatted = f"{amount:.{precision}f}"
+    # Eğer hassasiyet yüzünden miktar 0'a yuvarlanırsa, hatayı önlemek için ham değeri string olarak ver
+    if float(formatted) <= 0:
+        return str(amount)
+    return formatted
+
 def close_position(symbol, pos_amt):
     side = "SELL" if float(pos_amt) > 0 else "BUY"
-    precision = symbol_precisions.get(symbol, 0)
-    qty = f"{abs(float(pos_amt)):.{precision}f}"
+    qty = format_qty(symbol, abs(float(pos_amt)))
     
     url_path = "/fapi/v1/order"
     params = {
@@ -160,8 +167,7 @@ def close_position(symbol, pos_amt):
     log(f"Risk Yönetimi Kapatma İşlemi [{symbol}]: {res}")
 
 def open_order(symbol, side, qty):
-    precision = symbol_precisions.get(symbol, 0)
-    formatted_qty = f"{qty:.{precision}f}"
+    formatted_qty = format_qty(symbol, qty)
     
     url_path = "/fapi/v1/order"
     params = {
@@ -214,7 +220,7 @@ def trading_bot_loop():
                 
                 ema9 = calculate_ema(closes, 9)
                 ema21 = calculate_ema(closes, 21)
-                ema50 = calculate_ema(closes, 50)  # Ana trend filtresi için 50 EMA
+                ema50 = calculate_ema(closes, 50)
                 rsi = calculate_rsi(closes, 14)
                 
                 if not ema9 or not ema21 or not ema50:
@@ -222,25 +228,19 @@ def trading_bot_loop():
                 
                 current_price = closes[-1]
                 
-                # GELİŞMİŞ ANALİZ FİLTRELERİ:
-                # 1. Trend Gücü (EMA 9 ve 21 arasındaki mesafe yüzdesi)
                 trend_strength = abs(ema9 - ema21) / current_price
-                
-                # 2. Yön Filtresi (Fiyat ve EMA50 uyumu): Fiyat EMA50'nin üzerindeyse ana trend YUKARI, altındaysa AŞAĞI kabul edilir.
                 is_uptrend = current_price > ema50 and ema9 > ema21
                 is_downtrend = current_price < ema50 and ema9 < ema21
                 
-                # Sadece ana trendle uyumlu ve RSI sınırları içinde kalan net fırsatları al
-                if is_uptrend and 45 < rsi < 70:  # Boğa piyasasında sağlıklı Long
+                if is_uptrend and 45 < rsi < 70:
                     potential_signals.append({
                         "symbol": symbol, "side": "BUY", "strength": trend_strength, "price": current_price
                     })
-                elif is_downtrend and 30 < rsi < 55:  # Ayı piyasasında sağlıklı Short
+                elif is_downtrend and 30 < rsi < 55:
                     potential_signals.append({
                         "symbol": symbol, "side": "SELL", "strength": trend_strength, "price": current_price
                     })
             
-            # Analiz puanına (trend gücüne) göre sırala
             potential_signals.sort(key=lambda x: x['strength'], reverse=True)
             
             wallet_balance, available_balance = get_balance()
