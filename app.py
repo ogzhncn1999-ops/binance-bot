@@ -147,7 +147,6 @@ def get_balance():
 def format_qty(symbol, amount):
     precision = symbol_precisions.get(symbol, 3)
     formatted = f"{amount:.{precision}f}"
-    # Eğer hassasiyet yüzünden miktar 0'a yuvarlanırsa, hatayı önlemek için ham değeri string olarak ver
     if float(formatted) <= 0:
         return str(amount)
     return formatted
@@ -161,7 +160,8 @@ def close_position(symbol, pos_amt):
         "symbol": symbol,
         "side": side,
         "type": "MARKET",
-        "quantity": qty
+        "quantity": qty,
+        "reduceOnly": "true"  # 5 USDT alt limit kuralına takılmadan pozisyonu kapatmayı sağlar
     }
     res = send_signed_request('POST', url_path, params)
     log(f"Risk Yönetimi Kapatma İşlemi [{symbol}]: {res}")
