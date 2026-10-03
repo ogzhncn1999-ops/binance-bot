@@ -42,7 +42,7 @@ LEVERAGE = 3
 TRADE_USDT = 10.0
 MAX_ACTIVE_POSITIONS = 1
 
-# Daha seçici giriş
+# Daha seçici giriş (hacim ayrıca zorunlu filtre)
 MIN_SIGNAL_SCORE = 8
 VOLUME_MULTIPLIER = 1.15
 MIN_ATR_THRESHOLD = 0.002
@@ -113,10 +113,18 @@ def send_signed_request(http_method, url_path, payload=None, retries=2):
 
             log(f"API HATASI {url_path}: HTTP={response.status_code} DATA={data}")
 
-            if response.status_code in (418, 429) or (
-                isinstance(data, dict)
-                and data.get("code") in (-1021, -1008)
+            # 418 = IP ban. Retrying immediately only makes the situation worse.
+            if response.status_code == 418 or (
+                isinstance(data, dict) and data.get("code") == -1003
             ):
+                log("BINANCE 418/-1003: IP rate-limit ban. Yeni istek zorlanmıyor.")
+                return {}
+
+            if response.status_code == 429:
+                time.sleep(5 + attempt * 5)
+                continue
+
+            if isinstance(data, dict) and data.get("code") in (-1021, -1008):
                 time.sleep(2 + attempt)
                 continue
 
@@ -333,20 +341,25 @@ def calculate_macd_series(closes, fast=12, slow=26, signal_period=9):
 
 
 def round_step(value, step):
+    value = float(value)
+    step = float(step)
+
     if step <= 0:
         return value
+
     return math.floor(value / step + 1e-12) * step
 
 
 def format_qty(symbol, amount):
-    step = symbol_step_sizes.get(symbol, 0.001)
-    precision = symbol_precisions.get(symbol, 3)
-    rounded = round_step(amount, step)
+    step = float(symbol_step_sizes.get(symbol, 0.001))
+    precision = int(symbol_precisions.get(symbol, 3))
+    rounded = round_step(float(amount), step)
     return f"{rounded:.{precision}f}"
 
 
 def format_price(symbol, price):
-    tick = symbol_tick_sizes.get(symbol, 0.01)
+    tick = float(symbol_tick_sizes.get(symbol, 0.01))
+    price = float(price)
 
     if tick <= 0:
         return str(price)
@@ -444,23 +457,21 @@ def bot_client_id(symbol, kind):
 
 
 def place_protection_orders(symbol, position_amt, entry_price):
-    """
-    Güncel Binance USDⓈ-M Algo Order endpoint'i:
-    /fapi/v1/algoOrder
+    position_amt = float(position_amt)
+    entry_price = float(entry_price)
+    qty = format_qty(symbol, abs(position_amt))
 
-    Pozisyon açıldıktan sonra borsa tarafında gerçek
-    STOP_MARKET + TAKE_PROFIT_MARKET oluşturulur.
-    """
+    if entry_price <= 0:
+        log(f"Geçersiz entry price [{symbol}]: {entry_price}")
+        return False
 
-    qty = format_qty(symbol, abs(float(position_amt)))
-
-    if float(position_amt) > 0:
-        stop_price = entry_price * (1 - STOP_LOSS_PCT)
-        take_price = entry_price * (1 + TAKE_PROFIT_PCT)
+    if position_amt > 0:
+        stop_price = entry_price * (1 - float(STOP_LOSS_PCT))
+        take_price = entry_price * (1 + float(TAKE_PROFIT_PCT))
         exit_side = "SELL"
     else:
-        stop_price = entry_price * (1 + STOP_LOSS_PCT)
-        take_price = entry_price * (1 - TAKE_PROFIT_PCT)
+        stop_price = entry_price * (1 + float(STOP_LOSS_PCT))
+        take_price = entry_price * (1 - float(TAKE_PROFIT_PCT))
         exit_side = "BUY"
 
     stop_price = format_price(symbol, stop_price)
@@ -513,8 +524,6 @@ def place_protection_orders(symbol, position_amt, entry_price):
 
     if not tp_res or "algoId" not in tp_res:
         log(f"KRİTİK: TAKE PROFIT kurulamadı [{symbol}] -> {tp_res}")
-
-        # Pozisyonu korumasız bırakmıyoruz.
         close_position_market(symbol, position_amt)
         return False
 
@@ -556,20 +565,6 @@ def cancel_bot_algo_order(order):
     )
 
     return bool(res)
-
-
-def cleanup_bot_orders_for_closed_symbol(symbol):
-    """
-    Sadece BOT4H ile başlayan kendi koşullu emirlerini iptal eder.
-    Kullanıcının manuel koşullu emirlerine dokunmaz.
-    """
-    orders = get_open_algo_orders(symbol)
-
-    for order in orders:
-        client_id = str(order.get("clientAlgoId", ""))
-
-        if client_id.startswith(BOT_ORDER_PREFIX):
-            cancel_bot_algo_order(order)
 
 
 def build_signal(symbol, candles):
@@ -626,6 +621,9 @@ def build_signal(symbol, candles):
         if avg_volume > 0 else 0
     )
 
+    if volume_ratio < VOLUME_MULTIPLIER:
+        return None
+
     atr_ratio = atr / price if price > 0 else 0
 
     bullish_cross = (
@@ -677,9 +675,6 @@ def build_signal(symbol, candles):
     if 52 <= rsi <= 64:
         long_score += 1
 
-    if volume_ratio >= VOLUME_MULTIPLIER:
-        long_score += 1
-
     if bb_long_ok:
         long_score += 1
 
@@ -707,9 +702,6 @@ def build_signal(symbol, candles):
         short_score += 1
 
     if 36 <= rsi <= 48:
-        short_score += 1
-
-    if volume_ratio >= VOLUME_MULTIPLIER:
         short_score += 1
 
     if bb_short_ok:
@@ -752,11 +744,6 @@ def build_signal(symbol, candles):
 
 
 def process_open_positions(active_positions):
-    """
-    Bot yeniden başlasa bile açık pozisyonun korumasını kontrol eder.
-    Sadece BOT4H emirlerini kendi koruması olarak kabul eder.
-    """
-
     for pos in active_positions:
         symbol = pos["symbol"]
         amount = float(pos["positionAmt"])
@@ -793,8 +780,6 @@ def process_open_positions(active_positions):
                 f"(SL={has_bot_sl}, TP={has_bot_tp})."
             )
 
-            # Eski BOT4H korumalarını temizlemeden yeniden kuruyoruz.
-            # Böylece pozisyon korumasız kalmıyor.
             place_protection_orders(
                 symbol,
                 amount,
@@ -819,10 +804,16 @@ def open_trade(signal):
         log(f"Kaldıraç ayarlanamadı: {symbol}")
         return False
 
-    current_price = signal["price"]
+    current_price = float(signal["price"])
+    trade_usdt = float(TRADE_USDT)
+    leverage = float(LEVERAGE)
 
-    notional = TRADE_USDT * LEVERAGE
-    raw_qty = notional / current_price
+    if current_price <= 0:
+        log(f"Geçersiz fiyat: {symbol} -> {current_price}")
+        return False
+
+    notional = trade_usdt * leverage
+    raw_qty = float(notional) / float(current_price)
     qty = format_qty(symbol, raw_qty)
 
     if float(qty) <= 0:
@@ -898,7 +889,7 @@ def trading_bot_loop():
         f"SL={STOP_LOSS_PCT * 100:.2f}% | "
         f"TP={TAKE_PROFIT_PCT * 100:.2f}%"
     )
-    log(f"Minimum sinyal skoru: {MIN_SIGNAL_SCORE}/11")
+    log(f"Minimum sinyal skoru: {MIN_SIGNAL_SCORE}/10")
 
     load_exchange_info()
 
@@ -909,28 +900,7 @@ def trading_bot_loop():
                 p["symbol"] for p in active_positions
             }
 
-            # Mevcut pozisyonları önce koru.
             process_open_positions(active_positions)
-
-            # Pozisyon yoksa sadece BOT4H'nin eski koşullu emirlerini temizle.
-            # Manuel emirleri iptal etmez.
-            for symbol in active_symbols:
-                pass
-
-            for symbol in SYMBOLS:
-                if symbol not in available_symbols:
-                    continue
-
-                if symbol not in active_symbols:
-                    orders = get_open_algo_orders(symbol)
-
-                    if any(
-                        str(o.get("clientAlgoId", "")).startswith(
-                            BOT_ORDER_PREFIX
-                        )
-                        for o in orders
-                    ):
-                        cleanup_bot_orders_for_closed_symbol(symbol)
 
             if len(active_positions) >= MAX_ACTIVE_POSITIONS:
                 time.sleep(LOOP_SECONDS)
@@ -950,6 +920,9 @@ def trading_bot_loop():
                     INTERVAL,
                     KLINE_LIMIT
                 )
+
+                # [RATE LIMIT KORUMASI] Her coin isteği arasına minik gecikme eklendi
+                time.sleep(0.3)
 
                 if not candles:
                     continue
@@ -971,7 +944,6 @@ def trading_bot_loop():
             if potential_signals:
                 strongest = potential_signals[0]
 
-                # Aynı kapanmış 4h mumda ikinci işlem açma.
                 if strongest["candle_close"] != last_processed_candle:
                     last_processed_candle = strongest["candle_close"]
 
