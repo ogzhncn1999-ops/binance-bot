@@ -26,12 +26,13 @@ SYMBOLS = [
 INTERVAL = "1h"          # 1 saatlik mum aralığı
 LEVERAGE = 3             # Kaldıraç oranı
 TRADE_USDT = 10.0        # Her işlem için ayrılacak marjin (USDT)
-MAX_ACTIVE_POSITIONS = 1 # KRTİK: Aynı anda en fazla açılacak işlem sayısı
+MAX_ACTIVE_POSITIONS = 1 # Aynı anda en fazla açılacak işlem sayısı
 
 STOP_LOSS_PCT = 0.02     # %2.0 Zarar Kes
 TAKE_PROFIT_PCT = 0.06   # %6.0 Kâr Al
 MIN_ATR_THRESHOLD = 0.0015 
 
+symbol_step_sizes = {}
 symbol_precisions = {}
 
 def log(message):
@@ -68,7 +69,7 @@ def true_url_format(params):
     return {k: v for k, v in params.items() if v is not None}
 
 def load_exchange_info():
-    global symbol_precisions
+    global symbol_step_sizes, symbol_precisions
     url = f"{BASE_URL}/fapi/v1/exchangeInfo"
     try:
         res = requests.get(url).json()
@@ -77,7 +78,14 @@ def load_exchange_info():
                 sym = s['symbol']
                 precision = int(s['quantityPrecision'])
                 symbol_precisions[sym] = precision
-            log("Binance sembol hassasiyet bilgileri başarıyla yüklendi.")
+                
+                # LOT_SIZE filtresinden stepSize değerini al
+                for f in s['filters']:
+                    if f['filterType'] == 'LOT_SIZE':
+                        step_size = float(f['stepSize'])
+                        symbol_step_sizes[sym] = step_size
+                        break
+            log("Binance sembol hassasiyet ve stepSize bilgileri başarıyla yüklendi.")
     except Exception as e:
         log(f"ExchangeInfo Yükleme Hatası: {e}")
 
@@ -183,10 +191,14 @@ def get_balance():
     return 0.0, 0.0
 
 def format_qty(symbol, amount):
+    step_size = symbol_step_sizes.get(symbol, 0.001)
     precision = symbol_precisions.get(symbol, 3)
-    formatted = f"{amount:.{precision}f}"
-    if float(formatted) <= 0:
-        return str(amount)
+    
+    # Miktarı stepSize'a göre yuvarla
+    precision_factor = round(1 / step_size) if step_size < 1 else 1
+    rounded_amount = math.floor(amount * precision_factor) / precision_factor
+    
+    formatted = f"{rounded_amount:.{precision}f}"
     return formatted
 
 def close_position(symbol, pos_amt):
@@ -214,10 +226,10 @@ def open_order(symbol, side, qty):
         "quantity": formatted_qty
     }
     res = send_signed_request('POST', url_path, params)
-    log(f"Tekil Kontrollü İşlem Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
+    log(f"Hassasiyet Ayarlı İşlem Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
 
 def trading_bot_loop():
-    log("Tekil İşlem Limiti Modüllü Binance Bot Başlatıldı.")
+    log("Hassasiyet Korumalı Binance Bot Başlatıldı.")
     load_exchange_info()
     
     while True:
@@ -246,7 +258,6 @@ def trading_bot_loop():
 
             # 2. Adım: Eşzamanlı İşlem Sınırı Kontrolü
             if len(active_positions) >= MAX_ACTIVE_POSITIONS:
-                log(f"Mevcut açık pozisyon sayısı ({len(active_positions)}) sınırda ({MAX_ACTIVE_POSITIONS}). Yeni işlem aranmıyor.")
                 time.sleep(300)
                 continue
 
@@ -297,7 +308,6 @@ def trading_bot_loop():
             potential_signals.sort(key=lambda x: x['strength'], reverse=True)
             wallet_balance, available_balance = get_balance()
             
-            # Sadece en güçlü tek bir sinyali işleme al
             if potential_signals and len(active_positions) < MAX_ACTIVE_POSITIONS:
                 signal = potential_signals[0]
                 if available_balance >= TRADE_USDT:
@@ -317,7 +327,7 @@ def trading_bot_loop():
 
 @app.route('/')
 def index():
-    return "Tekil Sınırlandırmalı Binance Bot Aktif ve Çalışıyor."
+    return "Hassasiyet Korumalı Binance Bot Aktif ve Çalışıyor."
 
 if __name__ == '__main__':
     t = Thread(target=trading_bot_loop)
