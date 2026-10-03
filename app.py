@@ -23,7 +23,7 @@ SYMBOLS = [
     "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT", 
     "MATICUSDT", "NEARUSDT", "APTUSDT", "ATOMUSDT", "FTMUSDT"
 ]
-INTERVAL = "1h"          # 1 saatlik mum aralığı
+INTERVAL = "4h"          # 4 saatlik mum aralığına güncellendi
 LEVERAGE = 3             # Kaldıraç oranı
 TRADE_USDT = 10.0        # Her işlem için ayrılacak marjin (USDT)
 MAX_ACTIVE_POSITIONS = 1 # Aynı anda en fazla açılacak işlem sayısı
@@ -230,8 +230,7 @@ def open_order(symbol, side, qty):
     log(f"Hassasiyet Kilitli Güvenli İşlem Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
 
 def trading_bot_loop():
-    log("Güvenlik Kilitli Binance Bot Başlatıldı.")
-    # KRİTİK: Bilgiler tam yüklenmeden döngüye asla başlanmaz
+    log("Güvenlik Kilitli 4 Saatlik Binance Bot Başlatıldı.")
     load_exchange_info()
     
     while True:
@@ -326,7 +325,7 @@ def trading_bot_loop():
 
 @app.route('/')
 def index():
-    return "Güvenlik Kilitli Binance Bot Aktif ve Çalışıyor."
+    return "4 Saatlik Güvenlik Kilitli Binance Bot Aktif ve Çalışıyor."
 
 if __name__ == '__main__':
     t = Thread(target=trading_bot_loop)
