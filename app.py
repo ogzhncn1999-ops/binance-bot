@@ -71,23 +71,25 @@ def true_url_format(params):
 def load_exchange_info():
     global symbol_step_sizes, symbol_precisions
     url = f"{BASE_URL}/fapi/v1/exchangeInfo"
-    try:
-        res = requests.get(url).json()
-        if 'symbols' in res:
-            for s in res['symbols']:
-                sym = s['symbol']
-                precision = int(s['quantityPrecision'])
-                symbol_precisions[sym] = precision
-                
-                # LOT_SIZE filtresinden stepSize değerini al
-                for f in s['filters']:
-                    if f['filterType'] == 'LOT_SIZE':
-                        step_size = float(f['stepSize'])
-                        symbol_step_sizes[sym] = step_size
-                        break
-            log("Binance sembol hassasiyet ve stepSize bilgileri başarıyla yüklendi.")
-    except Exception as e:
-        log(f"ExchangeInfo Yükleme Hatası: {e}")
+    while True:
+        try:
+            res = requests.get(url).json()
+            if 'symbols' in res:
+                for s in res['symbols']:
+                    sym = s['symbol']
+                    precision = int(s['quantityPrecision'])
+                    symbol_precisions[sym] = precision
+                    
+                    for f in s['filters']:
+                        if f['filterType'] == 'LOT_SIZE':
+                            step_size = float(f['stepSize'])
+                            symbol_step_sizes[sym] = step_size
+                            break
+                log("Binance sembol hassasiyet ve stepSize bilgileri başarıyla yüklendi.")
+                return True
+        except Exception as e:
+            log(f"ExchangeInfo Yükleme Bekleniyor: {e}")
+        time.sleep(3)
 
 def set_leverage(symbol):
     url_path = "/fapi/v1/leverage"
@@ -194,7 +196,6 @@ def format_qty(symbol, amount):
     step_size = symbol_step_sizes.get(symbol, 0.001)
     precision = symbol_precisions.get(symbol, 3)
     
-    # Miktarı stepSize'a göre yuvarla
     precision_factor = round(1 / step_size) if step_size < 1 else 1
     rounded_amount = math.floor(amount * precision_factor) / precision_factor
     
@@ -226,10 +227,11 @@ def open_order(symbol, side, qty):
         "quantity": formatted_qty
     }
     res = send_signed_request('POST', url_path, params)
-    log(f"Hassasiyet Ayarlı İşlem Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
+    log(f"Hassasiyet Kilitli Güvenli İşlem Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
 
 def trading_bot_loop():
-    log("Hassasiyet Korumalı Binance Bot Başlatıldı.")
+    log("Güvenlik Kilitli Binance Bot Başlatıldı.")
+    # KRİTİK: Bilgiler tam yüklenmeden döngüye asla başlanmaz
     load_exchange_info()
     
     while True:
@@ -237,7 +239,6 @@ def trading_bot_loop():
             active_positions = get_all_positions()
             active_symbols = [p['symbol'] for p in active_positions]
             
-            # 1. Adım: Risk Yönetimi & Kâr/Zarar Takibi
             for pos in active_positions:
                 symbol = pos['symbol']
                 entry_price = float(pos['entryPrice'])
@@ -256,12 +257,10 @@ def trading_bot_loop():
                     log(f"Kâr Al Tetiklendi! [{symbol}] - Kâr: {pnl_pct*100:.2f}%")
                     close_position(symbol, pos_amt)
 
-            # 2. Adım: Eşzamanlı İşlem Sınırı Kontrolü
             if len(active_positions) >= MAX_ACTIVE_POSITIONS:
                 time.sleep(300)
                 continue
 
-            # 3. Adım: Sinyal Arama
             potential_signals = []
             for symbol in SYMBOLS:
                 if symbol in active_symbols:
@@ -327,7 +326,7 @@ def trading_bot_loop():
 
 @app.route('/')
 def index():
-    return "Hassasiyet Korumalı Binance Bot Aktif ve Çalışıyor."
+    return "Güvenlik Kilitli Binance Bot Aktif ve Çalışıyor."
 
 if __name__ == '__main__':
     t = Thread(target=trading_bot_loop)
