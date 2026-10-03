@@ -6,6 +6,7 @@ import requests
 from flask import Flask
 from urllib.parse import urlencode
 from threading import Thread
+import math
 
 app = Flask(__name__)
 
@@ -26,9 +27,10 @@ INTERVAL = "1h"          # 1 saatlik mum aralığı
 LEVERAGE = 3             # Kaldıraç oranı
 TRADE_USDT = 10.0        # Her işlem için ayrılacak marjin (USDT)
 
-# Risk Yönetimi Limitleri (%)
-STOP_LOSS_PCT = 0.025    # %2.5 zarar kes
-TAKE_PROFIT_PCT = 0.05   # %5 kâr al
+# Gelişmiş Risk Yönetimi & TP/SL Oranları
+STOP_LOSS_PCT = 0.02     # %2.0 Zarar Kes
+TAKE_PROFIT_PCT = 0.06   # %6.0 Kâr Al (Risk/Ödül Oranı 1:3)
+MIN_ATR_THRESHOLD = 0.0015 # Piyasa oynaklık filtresi (Çok ölü piyasaları eler)
 
 symbol_precisions = {}
 
@@ -84,17 +86,19 @@ def set_leverage(symbol):
     params = {"symbol": symbol, "leverage": LEVERAGE}
     send_signed_request('POST', url_path, params)
 
-def get_klines(symbol, interval, limit=60):
+def get_market_data(symbol, interval, limit=60):
     url = f"{BASE_URL}/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
         res = requests.get(url).json()
         if isinstance(res, list) and len(res) > 0:
+            highs = [float(x[2]) for x in res]
+            lows = [float(x[3]) for x in res]
             closes = [float(x[4]) for x in res]
-            return closes
-        return []
+            return highs, lows, closes
+        return [], [], []
     except Exception as e:
         log(f"KLINE Hatası ({symbol}): {e}")
-        return []
+        return [], [], []
 
 def calculate_ema(data, period):
     if not data or len(data) < period:
@@ -122,8 +126,44 @@ def calculate_rsi(data, period=14):
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    return rsi
+    return 100.0 - (100.0 / (1.0 + rs))
+
+def calculate_atr(highs, lows, closes, period=14):
+    if len(closes) < period + 1:
+        return 0.0
+    tr_list = []
+    for i in range(1, len(closes)):
+        hl = highs[i] - lows[i]
+        hc = abs(highs[i] - closes[i-1])
+        lc = abs(lows[i] - closes[i-1])
+        tr = max(hl, hc, lc)
+        tr_list.append(tr)
+    if len(tr_list) < period:
+        return sum(tr_list) / len(tr_list) if tr_list else 0.0
+    return sum(tr_list[-period:]) / period
+
+def calculate_bollinger_bands(closes, period=20, std_dev=2):
+    if len(closes) < period:
+        return None, None, None
+    sma = sum(closes[-period:]) / period
+    variance = sum((x - sma) ** 2 for x in closes[-period:]) / period
+    stdev = math.sqrt(variance)
+    upper_band = sma + (std_dev * stdev)
+    lower_band = sma - (std_dev * stdev)
+    return upper_band, sma, lower_band
+
+def calculate_macd(closes):
+    if len(closes) < 35:
+        return 0, 0
+    # Basitleştirilmiş ve hızlı MACD (12, 26, 9) hesaplaması
+    ema12 = calculate_ema(closes, 12)
+    ema26 = calculate_ema(closes, 26)
+    if not ema12 or not ema26:
+        return 0, 0
+    macd_line = ema12 - ema26
+    # Sinyal için yaklaşık bir değer
+    signal_line = macd_line * 0.9  
+    return macd_line, signal_line
 
 def get_all_positions():
     url_path = "/fapi/v2/positionRisk"
@@ -161,14 +201,13 @@ def close_position(symbol, pos_amt):
         "side": side,
         "type": "MARKET",
         "quantity": qty,
-        "reduceOnly": "true"  # 5 USDT alt limit kuralına takılmadan pozisyonu kapatmayı sağlar
+        "reduceOnly": "true"
     }
     res = send_signed_request('POST', url_path, params)
-    log(f"Risk Yönetimi Kapatma İşlemi [{symbol}]: {res}")
+    log(f"Risk Yönetimi Pozisyon Kapatma [{symbol}]: {res}")
 
 def open_order(symbol, side, qty):
     formatted_qty = format_qty(symbol, qty)
-    
     url_path = "/fapi/v1/order"
     params = {
         "symbol": symbol,
@@ -177,10 +216,10 @@ def open_order(symbol, side, qty):
         "quantity": formatted_qty
     }
     res = send_signed_request('POST', url_path, params)
-    log(f"Güçlü Analiz İşlemi Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
+    log(f"Gelişmiş Filtreli İşlem Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
 
 def trading_bot_loop():
-    log("Gelişmiş Analiz Motorlu Binance Bot Başlatıldı.")
+    log("Gelişmiş Çoklu Filtreleme Motorlu Binance Bot Başlatıldı.")
     load_exchange_info()
     
     while True:
@@ -188,7 +227,7 @@ def trading_bot_loop():
             active_positions = get_all_positions()
             active_symbols = [p['symbol'] for p in active_positions]
             
-            # 1. Adım: Mevcut pozisyonların Stop-Loss ve Take-Profit kontrolleri
+            # 1. Adım: Risk Yönetimi & Dinamik Kâr/Zarar Takibi
             for pos in active_positions:
                 symbol = pos['symbol']
                 entry_price = float(pos['entryPrice'])
@@ -200,49 +239,65 @@ def trading_bot_loop():
                 else:
                     pnl_pct = (entry_price - current_price) / entry_price
                 
+                # Zarar Kes veya Kâr Al
                 if pnl_pct <= -STOP_LOSS_PCT:
-                    log(f"Stop-Loss Tetiklendi! [{symbol}] - Zarar oranı: {pnl_pct*100:.2f}%")
+                    log(f"Stop-Loss Tetiklendi! [{symbol}] - Zarar: {pnl_pct*100:.2f}%")
                     close_position(symbol, pos_amt)
                 elif pnl_pct >= TAKE_PROFIT_PCT:
-                    log(f"Kâr Al Tetiklendi! [{symbol}] - Kâr oranı: {pnl_pct*100:.2f}%")
+                    log(f"Kâr Al Tetiklendi! [{symbol}] - Kâr: {pnl_pct*100:.2f}%")
                     close_position(symbol, pos_amt)
 
-            # 2. Adım: Gelişmiş Analiz ve Sinyal Filtreleme
+            # 2. Adım: Çoklu Gösterge ve Oynaklık Filtresiyle Sinyal Arama
             potential_signals = []
             
             for symbol in SYMBOLS:
                 if symbol in active_symbols:
                     continue
                 
-                closes = get_klines(symbol, INTERVAL, limit=50)
-                if not closes or len(closes) < 30:
-                    continue
-                
-                ema9 = calculate_ema(closes, 9)
-                ema21 = calculate_ema(closes, 21)
-                ema50 = calculate_ema(closes, 50)
-                rsi = calculate_rsi(closes, 14)
-                
-                if not ema9 or not ema21 or not ema50:
+                highs, lows, closes = get_market_data(symbol, INTERVAL, limit=60)
+                if not closes or len(closes) < 40:
                     continue
                 
                 current_price = closes[-1]
                 
-                trend_strength = abs(ema9 - ema21) / current_price
-                is_uptrend = current_price > ema50 and ema9 > ema21
-                is_downtrend = current_price < ema50 and ema9 < ema21
+                # Gösterge Hesaplamaları
+                ema9 = calculate_ema(closes, 9)
+                ema21 = calculate_ema(closes, 21)
+                ema50 = calculate_ema(closes, 50)
+                rsi = calculate_rsi(closes, 14)
+                atr = calculate_atr(highs, lows, closes, 14)
+                upper_b, mid_b, lower_b = calculate_bollinger_bands(closes, 20, 2)
+                macd_line, signal_line = calculate_macd(closes)
                 
-                if is_uptrend and 45 < rsi < 70:
+                if not ema9 or not ema21 or not ema50 or not upper_b:
+                    continue
+                
+                # Volatilite (ATR) Filtresi: Ölü piyasaları ele
+                if (atr / current_price) < MIN_ATR_THRESHOLD:
+                    continue
+                
+                trend_strength = abs(ema9 - ema21) / current_price
+                
+                # AL (BUY) Koşulları (Trend + RSI + MACD + Bollinger Onayı)
+                is_uptrend = (current_price > ema50) and (ema9 > ema21)
+                macd_bullish = macd_line > signal_line
+                bb_bullish = current_price > mid_b and current_price < upper_b
+                
+                # SAT (SELL) Koşulları
+                is_downtrend = (current_price < ema50) and (ema9 < ema21)
+                macd_bearish = macd_line < signal_line
+                bb_bearish = current_price < mid_b and current_price > lower_b
+                
+                if is_uptrend and (48 < rsi < 65) and macd_bullish and bb_bullish:
                     potential_signals.append({
                         "symbol": symbol, "side": "BUY", "strength": trend_strength, "price": current_price
                     })
-                elif is_downtrend and 30 < rsi < 55:
+                elif is_downtrend and (35 < rsi < 52) and macd_bearish and bb_bearish:
                     potential_signals.append({
                         "symbol": symbol, "side": "SELL", "strength": trend_strength, "price": current_price
                     })
             
             potential_signals.sort(key=lambda x: x['strength'], reverse=True)
-            
             wallet_balance, available_balance = get_balance()
             
             for signal in potential_signals:
@@ -266,7 +321,7 @@ def trading_bot_loop():
 
 @app.route('/')
 def index():
-    return "Gelişmiş Analiz Motorlu Binance Bot Aktif ve Çalışıyor."
+    return "Gelişmiş Çoklu Filtreleme Motorlu Binance Bot Aktif ve Çalışıyor."
 
 if __name__ == '__main__':
     t = Thread(target=trading_bot_loop)
