@@ -50,7 +50,7 @@ STOP_LOSS_PCT = 0.025
 TAKE_PROFIT_PCT = 0.075
 
 KLINE_LIMIT = 250
-LOOP_SECONDS = 120  # Ortak IP ban riskini en aza indirmek için süre esnetildi
+LOOP_SECONDS = 180  # Ortak IP ban riskini minimuma indirmek için döngü süresi esnetildi
 
 BOT_ORDER_PREFIX = "BOT4H"
 
@@ -72,7 +72,7 @@ def true_url_format(params):
     return {k: v for k, v in params.items() if v is not None}
 
 
-def send_signed_request(http_method, url_path, payload=None, retries=2):
+def send_signed_request(http_method, url_path, payload=None, retries=3):
     if payload is None:
         payload = {}
 
@@ -113,12 +113,12 @@ def send_signed_request(http_method, url_path, payload=None, retries=2):
             if response.status_code == 418 or (
                 isinstance(data, dict) and data.get("code") == -1003
             ):
-                log("BINANCE 418/-1003: IP rate-limit ban. 120 saniye bekleniyor.")
-                time.sleep(120)
-                return {}
+                log("BINANCE 418/-1003: IP rate-limit ban. 180 saniye bekleniyor.")
+                time.sleep(180)
+                continue
 
             if response.status_code == 429:
-                time.sleep(15 + attempt * 5)
+                time.sleep(30 + attempt * 10)
                 continue
 
             return {}
@@ -126,7 +126,7 @@ def send_signed_request(http_method, url_path, payload=None, retries=2):
         except Exception as e:
             log(f"API İstek Hatası {url_path}: {e}")
             if attempt < retries:
-                time.sleep(5)
+                time.sleep(10)
             else:
                 return {}
 
@@ -138,18 +138,22 @@ def load_exchange_info():
     global symbol_tick_sizes, available_symbols
 
     url = f"{BASE_URL}/fapi/v1/exchangeInfo"
+    
+    # Render IP banlarının ilk açılışta geçmesi için kısa bir ısınma uykusu
+    time.sleep(5)
 
     while True:
         try:
             res = session.get(url, timeout=10).json()
 
             if "symbols" not in res:
-                # Ban veya rate limit durumunda sonsuz döngüde patlamaması için bekleme eklendi
                 if isinstance(res, dict) and res.get("code") in (-1003, 418):
-                    log("ExchangeInfo IP Ban / Rate-Limit yakalandı. 90 saniye bekleniyor...")
-                    time.sleep(90)
+                    log("ExchangeInfo IP Ban / Rate-Limit yakalandı. 180 saniye bekleniyor...")
+                    time.sleep(180)
                     continue
-                raise RuntimeError(res)
+                log(f"ExchangeInfo yanıtı geçersiz: {res}")
+                time.sleep(30)
+                continue
 
             for s in res["symbols"]:
                 sym = s["symbol"]
@@ -170,7 +174,7 @@ def load_exchange_info():
                     elif f["filterType"] == "PRICE_FILTER":
                         symbol_tick_sizes[sym] = float(f["tickSize"])
 
-            log("Binance exchangeInfo başarıyla yüklendi.")
+            log("Binance exchangeInfo başarıyla yüklendi ve belleğe alındı.")
             return True
 
         except Exception as e:
@@ -414,25 +418,6 @@ def open_market_order(symbol, side, qty):
     return res
 
 
-def close_position_market(symbol, pos_amt):
-    side = "SELL" if float(pos_amt) > 0 else "BUY"
-    qty = format_qty(symbol, abs(float(pos_amt)))
-
-    res = send_signed_request(
-        "POST",
-        "/fapi/v1/order",
-        {
-            "symbol": symbol,
-            "side": side,
-            "type": "MARKET",
-            "quantity": qty,
-            "reduceOnly": "true",
-            "newOrderRespType": "RESULT"
-        }
-    )
-    return res
-
-
 def bot_client_id(symbol, kind):
     return f"{BOT_ORDER_PREFIX}{kind}{symbol}{int(time.time()) % 1000000}"[:32]
 
@@ -472,7 +457,7 @@ def place_protection_orders(symbol, position_amt, entry_price):
         }
     )
 
-    time.sleep(1.0)
+    time.sleep(1.5)
 
     send_signed_request(
         "POST",
@@ -624,7 +609,7 @@ def open_trade(signal):
     if not order:
         return False
 
-    time.sleep(1.5)
+    time.sleep(2.0)
     position = get_position(symbol)
     if not position:
         return False
@@ -642,7 +627,7 @@ def trading_bot_loop():
 
     log("GÜVENLİ 4H TREND BOTU BAŞLADI (IP Ban Korumalı).")
     
-    # ExchangeInfo yüklenene kadar akıllı bekleme döngüsü
+    # ExchangeInfo bir kez yüklenir ve hafızada tutulur
     load_exchange_info()
 
     while True:
@@ -664,8 +649,8 @@ def trading_bot_loop():
 
                 candles = get_market_data(symbol, INTERVAL, KLINE_LIMIT)
                 
-                # Render IP limitlerine takılmamak için istekler arasına güvenli gecikme
-                time.sleep(1.2)
+                # Render IP ban limitlerine takılmamak için her coin sorgusu arasına güvenli bekleme
+                time.sleep(2.0)
 
                 if not candles:
                     continue
@@ -687,7 +672,7 @@ def trading_bot_loop():
 
         except Exception as e:
             log(f"BOT DÖNGÜ HATASI: {e}")
-            time.sleep(45)
+            time.sleep(60)
 
 
 @app.route("/")
