@@ -23,14 +23,14 @@ SYMBOLS = [
     "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT", 
     "MATICUSDT", "NEARUSDT", "APTUSDT", "ATOMUSDT", "FTMUSDT"
 ]
-INTERVAL = "4h"          # 4 saatlik mum aralığına güncellendi
+INTERVAL = "4h"          # 4 saatlik mum aralığı
 LEVERAGE = 3             # Kaldıraç oranı
 TRADE_USDT = 10.0        # Her işlem için ayrılacak marjin (USDT)
 MAX_ACTIVE_POSITIONS = 1 # Aynı anda en fazla açılacak işlem sayısı
 
-STOP_LOSS_PCT = 0.02     # %2.0 Zarar Kes
-TAKE_PROFIT_PCT = 0.06   # %6.0 Kâr Al
-MIN_ATR_THRESHOLD = 0.0015 
+STOP_LOSS_PCT = 0.025    # %2.5 Zarar Kes (Dalgalanmalara karşı hafif esnetildi)
+TAKE_PROFIT_PCT = 0.075  # %7.5 Kâr Al (Ödül/Risk oranı iyileştirildi)
+MIN_ATR_THRESHOLD = 0.002 # Volatilite filtresi biraz daha sıkılaştırıldı
 
 symbol_step_sizes = {}
 symbol_precisions = {}
@@ -104,11 +104,12 @@ def get_market_data(symbol, interval, limit=60):
             highs = [float(x[2]) for x in res]
             lows = [float(x[3]) for x in res]
             closes = [float(x[4]) for x in res]
-            return highs, lows, closes
-        return [], [], []
+            volumes = [float(x[5]) for x in res]
+            return highs, lows, closes, volumes
+        return [], [], [], []
     except Exception as e:
         log(f"KLINE Hatası ({symbol}): {e}")
-        return [], [], []
+        return [], [], [], []
 
 def calculate_ema(data, period):
     if not data or len(data) < period:
@@ -227,10 +228,10 @@ def open_order(symbol, side, qty):
         "quantity": formatted_qty
     }
     res = send_signed_request('POST', url_path, params)
-    log(f"Hassasiyet Kilitli Güvenli İşlem Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
+    log(f"Optimize Edilmiş Güvenli İşlem Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
 
 def trading_bot_loop():
-    log("Güvenlik Kilitli 4 Saatlik Binance Bot Başlatıldı.")
+    log("Optimize Edilmiş 4 Saatlik Trend Botu Başlatıldı.")
     load_exchange_info()
     
     while True:
@@ -265,11 +266,14 @@ def trading_bot_loop():
                 if symbol in active_symbols:
                     continue
                 
-                highs, lows, closes = get_market_data(symbol, INTERVAL, limit=60)
+                highs, lows, closes, volumes = get_market_data(symbol, INTERVAL, limit=60)
                 if not closes or len(closes) < 40:
                     continue
                 
                 current_price = closes[-1]
+                current_volume = volumes[-1]
+                avg_volume = sum(volumes[-10:]) / 10  # Son 10 mumun ortalama hacmi
+                
                 ema9 = calculate_ema(closes, 9)
                 ema21 = calculate_ema(closes, 21)
                 ema50 = calculate_ema(closes, 50)
@@ -281,11 +285,15 @@ def trading_bot_loop():
                 if not ema9 or not ema21 or not ema50 or not upper_b:
                     continue
                 
+                # Volatilite ve Hacim Filtresi (Zayıf piyasaları ele)
                 if (atr / current_price) < MIN_ATR_THRESHOLD:
+                    continue
+                if current_volume < avg_volume * 1.1:  # Hacim ortalamanın altındaysa es geç
                     continue
                 
                 trend_strength = abs(ema9 - ema21) / current_price
                 
+                # Sıkılaştırılmış Trend Koşulları
                 is_uptrend = (current_price > ema50) and (ema9 > ema21)
                 macd_bullish = macd_line > signal_line
                 bb_bullish = current_price > mid_b and current_price < upper_b
@@ -294,11 +302,11 @@ def trading_bot_loop():
                 macd_bearish = macd_line < signal_line
                 bb_bearish = current_price < mid_b and current_price > lower_b
                 
-                if is_uptrend and (48 < rsi < 65) and macd_bullish and bb_bullish:
+                if is_uptrend and (50 < rsi < 65) and macd_bullish and bb_bullish:
                     potential_signals.append({
                         "symbol": symbol, "side": "BUY", "strength": trend_strength, "price": current_price
                     })
-                elif is_downtrend and (35 < rsi < 52) and macd_bearish and bb_bearish:
+                elif is_downtrend and (35 < rsi < 50) and macd_bearish and bb_bearish:
                     potential_signals.append({
                         "symbol": symbol, "side": "SELL", "strength": trend_strength, "price": current_price
                     })
@@ -325,7 +333,7 @@ def trading_bot_loop():
 
 @app.route('/')
 def index():
-    return "4 Saatlik Güvenlik Kilitli Binance Bot Aktif ve Çalışıyor."
+    return "Optimize Edilmiş Trend Botu Aktif ve Çalışıyor."
 
 if __name__ == '__main__':
     t = Thread(target=trading_bot_loop)
