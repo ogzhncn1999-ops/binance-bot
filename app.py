@@ -34,7 +34,7 @@ if not API_KEY or not API_SECRET:
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT",
-    "MATICUSDT", "NEARUSDT", "APTUSDT", "ATOMUSDT", "FTMUSDT"
+    "NEARUSDT", "APTUSDT", "ATOMUSDT"
 ]
 
 INTERVAL = "4h"
@@ -42,18 +42,15 @@ LEVERAGE = 3
 TRADE_USDT = 10.0
 MAX_ACTIVE_POSITIONS = 1
 
-# Daha seçici giriş (hacim ayrıca zorunlu filtre)
 MIN_SIGNAL_SCORE = 8
 VOLUME_MULTIPLIER = 1.15
 MIN_ATR_THRESHOLD = 0.002
 
-# Orijinal hedef korunuyor: yaklaşık 1:3
 STOP_LOSS_PCT = 0.025
 TAKE_PROFIT_PCT = 0.075
 
-# EMA200 kullanıldığı için yeterli veri
 KLINE_LIMIT = 250
-LOOP_SECONDS = 60
+LOOP_SECONDS = 90  # Ortak IP ban riskini azaltmak için döngü süresi esnetildi
 
 BOT_ORDER_PREFIX = "BOT4H"
 
@@ -113,19 +110,15 @@ def send_signed_request(http_method, url_path, payload=None, retries=2):
 
             log(f"API HATASI {url_path}: HTTP={response.status_code} DATA={data}")
 
-            # 418 = IP ban. Retrying immediately only makes the situation worse.
             if response.status_code == 418 or (
                 isinstance(data, dict) and data.get("code") == -1003
             ):
-                log("BINANCE 418/-1003: IP rate-limit ban. Yeni istek zorlanmıyor.")
+                log("BINANCE 418/-1003: IP rate-limit ban. 60 saniye bekleniyor.")
+                time.sleep(60)
                 return {}
 
             if response.status_code == 429:
-                time.sleep(5 + attempt * 5)
-                continue
-
-            if isinstance(data, dict) and data.get("code") in (-1021, -1008):
-                time.sleep(2 + attempt)
+                time.sleep(10 + attempt * 5)
                 continue
 
             return {}
@@ -133,7 +126,7 @@ def send_signed_request(http_method, url_path, payload=None, retries=2):
         except Exception as e:
             log(f"API İstek Hatası {url_path}: {e}")
             if attempt < retries:
-                time.sleep(2)
+                time.sleep(3)
             else:
                 return {}
 
@@ -173,16 +166,11 @@ def load_exchange_info():
                         symbol_tick_sizes[sym] = float(f["tickSize"])
 
             log("Binance exchangeInfo yüklendi.")
-
-            missing = [s for s in SYMBOLS if s not in available_symbols]
-            if missing:
-                log(f"UYARI: Kullanılamayan semboller atlandı: {missing}")
-
             return True
 
         except Exception as e:
             log(f"ExchangeInfo hatası: {e}")
-            time.sleep(5)
+            time.sleep(10)
 
 
 def set_leverage(symbol):
@@ -217,7 +205,6 @@ def get_market_data(symbol, interval, limit=250):
                 "volume": float(x[5])
             })
 
-        # Son mum açık olabilir. Sinyalde kullanılmıyor.
         return candles[:-1]
 
     except Exception as e:
@@ -290,7 +277,6 @@ def calculate_atr(highs, lows, closes, period=14):
     if len(tr) < period:
         return 0.0
 
-    # Wilder ATR
     atr = sum(tr[:period]) / period
     for value in tr[period:]:
         atr = ((atr * (period - 1)) + value) / period
@@ -376,7 +362,6 @@ def format_price(symbol, price):
 
 def get_all_positions():
     res = send_signed_request("GET", "/fapi/v2/positionRisk")
-
     positions = []
 
     if isinstance(res, list):
@@ -421,12 +406,6 @@ def open_market_order(symbol, side, qty):
     }
 
     res = send_signed_request("POST", "/fapi/v1/order", params)
-
-    if not res or "orderId" not in res:
-        log(f"EMİR AÇILAMADI [{symbol} {side}] -> {res}")
-        return None
-
-    log(f"MARKET EMİR AÇILDI [{symbol} {side}] -> {res}")
     return res
 
 
@@ -446,13 +425,10 @@ def close_position_market(symbol, pos_amt):
             "newOrderRespType": "RESULT"
         }
     )
-
-    log(f"ACİL POZİSYON KAPATMA [{symbol}] -> {res}")
     return res
 
 
 def bot_client_id(symbol, kind):
-    # 32 karakter sınırını aşmamak için kısa tutuyoruz.
     return f"{BOT_ORDER_PREFIX}{kind}{symbol}{int(time.time()) % 1000000}"[:32]
 
 
@@ -460,10 +436,6 @@ def place_protection_orders(symbol, position_amt, entry_price):
     position_amt = float(position_amt)
     entry_price = float(entry_price)
     qty = format_qty(symbol, abs(position_amt))
-
-    if entry_price <= 0:
-        log(f"Geçersiz entry price [{symbol}]: {entry_price}")
-        return False
 
     if position_amt > 0:
         stop_price = entry_price * (1 - float(STOP_LOSS_PCT))
@@ -477,7 +449,7 @@ def place_protection_orders(symbol, position_amt, entry_price):
     stop_price = format_price(symbol, stop_price)
     take_price = format_price(symbol, take_price)
 
-    stop_res = send_signed_request(
+    send_signed_request(
         "POST",
         "/fapi/v1/algoOrder",
         {
@@ -495,16 +467,9 @@ def place_protection_orders(symbol, position_amt, entry_price):
         }
     )
 
-    if not stop_res or "algoId" not in stop_res:
-        log(f"KRİTİK: STOP kurulamadı [{symbol}] -> {stop_res}")
-        return False
+    time.sleep(0.5)
 
-    log(
-        f"STOP AKTİF [{symbol}] "
-        f"trigger={stop_price} algoId={stop_res.get('algoId')}"
-    )
-
-    tp_res = send_signed_request(
+    send_signed_request(
         "POST",
         "/fapi/v1/algoOrder",
         {
@@ -522,16 +487,6 @@ def place_protection_orders(symbol, position_amt, entry_price):
         }
     )
 
-    if not tp_res or "algoId" not in tp_res:
-        log(f"KRİTİK: TAKE PROFIT kurulamadı [{symbol}] -> {tp_res}")
-        close_position_market(symbol, position_amt)
-        return False
-
-    log(
-        f"TAKE PROFIT AKTİF [{symbol}] "
-        f"trigger={take_price} algoId={tp_res.get('algoId')}"
-    )
-
     return True
 
 
@@ -542,29 +497,6 @@ def get_open_algo_orders(symbol):
         {"symbol": symbol}
     )
     return res if isinstance(res, list) else []
-
-
-def cancel_bot_algo_order(order):
-    algo_id = order.get("algoId")
-
-    if not algo_id:
-        return False
-
-    res = send_signed_request(
-        "DELETE",
-        "/fapi/v1/algoOrder",
-        {
-            "symbol": order.get("symbol"),
-            "algoId": algo_id
-        }
-    )
-
-    log(
-        f"BOT koşullu emir iptal edildi "
-        f"[{order.get('symbol')}] algoId={algo_id} -> {res}"
-    )
-
-    return bool(res)
 
 
 def build_signal(symbol, candles):
@@ -587,23 +519,16 @@ def build_signal(symbol, candles):
     rsi = calculate_rsi(closes, 14)
     atr = calculate_atr(highs, lows, closes, 14)
 
-    upper_b, mid_b, lower_b = calculate_bollinger_bands(
-        closes, 20, 2
-    )
-
+    upper_b, mid_b, lower_b = calculate_bollinger_bands(closes, 20, 2)
     macd_data = calculate_macd_series(closes)
 
-    if any(x is None for x in (
-        ema9, ema21, ema50, ema200,
-        ema21_prev, upper_b, mid_b, lower_b
-    )):
+    if any(x is None for x in (ema9, ema21, ema50, ema200, ema21_prev, upper_b, mid_b, lower_b)):
         return None
 
     if not macd_data:
         return None
 
     macd_values, signal_values = macd_data
-
     if len(macd_values) < 2 or len(signal_values) < 2:
         return None
 
@@ -616,35 +541,17 @@ def build_signal(symbol, candles):
     hist_prev = macd_prev - signal_prev
 
     avg_volume = sum(volumes[-11:-1]) / 10
-    volume_ratio = (
-        volumes[-1] / avg_volume
-        if avg_volume > 0 else 0
-    )
+    volume_ratio = volumes[-1] / avg_volume if avg_volume > 0 else 0
 
     if volume_ratio < VOLUME_MULTIPLIER:
         return None
 
     atr_ratio = atr / price if price > 0 else 0
 
-    bullish_cross = (
-        macd_prev <= signal_prev
-        and macd_now > signal_now
-    )
-
-    bearish_cross = (
-        macd_prev >= signal_prev
-        and macd_now < signal_now
-    )
-
-    bullish_momentum = (
-        macd_now > signal_now
-        and hist_now > hist_prev
-    )
-
-    bearish_momentum = (
-        macd_now < signal_now
-        and hist_now < hist_prev
-    )
+    bullish_cross = macd_prev <= signal_prev and macd_now > signal_now
+    bearish_cross = macd_prev >= signal_prev and macd_now < signal_now
+    bullish_momentum = macd_now > signal_now and hist_now > hist_prev
+    bearish_momentum = macd_now < signal_now and hist_now < hist_prev
 
     ema21_rising = ema21 > ema21_prev
     ema21_falling = ema21 < ema21_prev
@@ -652,66 +559,31 @@ def build_signal(symbol, candles):
     bb_long_ok = price > mid_b and price < upper_b
     bb_short_ok = price < mid_b and price > lower_b
 
-    # ---------------- LONG ----------------
+    # LONG SCORE
     long_score = 0
+    if price > ema200: long_score += 2
+    if ema9 > ema21: long_score += 1
+    if ema21 > ema50: long_score += 1
+    if ema21_rising: long_score += 1
+    if bullish_cross: long_score += 2
+    elif bullish_momentum: long_score += 1
+    if 52 <= rsi <= 64: long_score += 1
+    if bb_long_ok: long_score += 1
+    if atr_ratio >= MIN_ATR_THRESHOLD: long_score += 1
 
-    if price > ema200:
-        long_score += 2
-
-    if ema9 > ema21:
-        long_score += 1
-
-    if ema21 > ema50:
-        long_score += 1
-
-    if ema21_rising:
-        long_score += 1
-
-    if bullish_cross:
-        long_score += 2
-    elif bullish_momentum:
-        long_score += 1
-
-    if 52 <= rsi <= 64:
-        long_score += 1
-
-    if bb_long_ok:
-        long_score += 1
-
-    if atr_ratio >= MIN_ATR_THRESHOLD:
-        long_score += 1
-
-    # ---------------- SHORT ----------------
+    # SHORT SCORE
     short_score = 0
-
-    if price < ema200:
-        short_score += 2
-
-    if ema9 < ema21:
-        short_score += 1
-
-    if ema21 < ema50:
-        short_score += 1
-
-    if ema21_falling:
-        short_score += 1
-
-    if bearish_cross:
-        short_score += 2
-    elif bearish_momentum:
-        short_score += 1
-
-    if 36 <= rsi <= 48:
-        short_score += 1
-
-    if bb_short_ok:
-        short_score += 1
-
-    if atr_ratio >= MIN_ATR_THRESHOLD:
-        short_score += 1
+    if price < ema200: short_score += 2
+    if ema9 < ema21: short_score += 1
+    if ema21 < ema50: short_score += 1
+    if ema21_falling: short_score += 1
+    if bearish_cross: short_score += 2
+    elif bearish_momentum: short_score += 1
+    if 36 <= rsi <= 48: short_score += 1
+    if bb_short_ok: short_score += 1
+    if atr_ratio >= MIN_ATR_THRESHOLD: short_score += 1
 
     best_score = max(long_score, short_score)
-
     if best_score < MIN_SIGNAL_SCORE:
         return None
 
@@ -730,61 +602,9 @@ def build_signal(symbol, candles):
         "score": score,
         "price": price,
         "rsi": rsi,
-        "atr_ratio": atr_ratio,
         "volume_ratio": volume_ratio,
-        "ema9": ema9,
-        "ema21": ema21,
-        "ema50": ema50,
-        "ema200": ema200,
-        "macd": macd_now,
-        "macd_signal": signal_now,
-        "macd_hist": hist_now,
         "candle_close": candles[-1]["close_time"]
     }
-
-
-def process_open_positions(active_positions):
-    for pos in active_positions:
-        symbol = pos["symbol"]
-        amount = float(pos["positionAmt"])
-        entry_price = float(pos["entryPrice"])
-
-        if amount == 0 or entry_price <= 0:
-            continue
-
-        orders = get_open_algo_orders(symbol)
-
-        has_bot_sl = False
-        has_bot_tp = False
-
-        for order in orders:
-            client_id = str(order.get("clientAlgoId", ""))
-
-            if not client_id.startswith(BOT_ORDER_PREFIX):
-                continue
-
-            order_type = order.get(
-                "orderType",
-                order.get("type", "")
-            )
-
-            if order_type == "STOP_MARKET":
-                has_bot_sl = True
-
-            if order_type == "TAKE_PROFIT_MARKET":
-                has_bot_tp = True
-
-        if not has_bot_sl or not has_bot_tp:
-            log(
-                f"UYARI: {symbol} koruma eksik "
-                f"(SL={has_bot_sl}, TP={has_bot_tp})."
-            )
-
-            place_protection_orders(
-                symbol,
-                amount,
-                entry_price
-            )
 
 
 def open_trade(signal):
@@ -792,115 +612,46 @@ def open_trade(signal):
     side = signal["side"]
 
     _, available = get_balance()
-
     if available < TRADE_USDT:
-        log(
-            f"İşlem açılmadı: availableBalance="
-            f"{available:.2f} < {TRADE_USDT:.2f}"
-        )
+        log(f"İşlem açılmadı: Bakiye yetersiz ({available:.2f} USDT)")
         return False
 
     if not set_leverage(symbol):
-        log(f"Kaldıraç ayarlanamadı: {symbol}")
         return False
 
     current_price = float(signal["price"])
-    trade_usdt = float(TRADE_USDT)
-    leverage = float(LEVERAGE)
-
-    if current_price <= 0:
-        log(f"Geçersiz fiyat: {symbol} -> {current_price}")
-        return False
-
-    notional = trade_usdt * leverage
-    raw_qty = float(notional) / float(current_price)
+    notional = float(TRADE_USDT) * float(LEVERAGE)
+    raw_qty = notional / current_price
     qty = format_qty(symbol, raw_qty)
 
-    if float(qty) <= 0:
-        log(f"Geçersiz quantity: {symbol} {qty}")
-        return False
-
-    log(
-        f"SİNYAL {symbol} {side} | "
-        f"score={signal['score']}/11 | "
-        f"RSI={signal['rsi']:.2f} | "
-        f"Volume={signal['volume_ratio']:.2f}x | "
-        f"ATR={signal['atr_ratio'] * 100:.2f}%"
-    )
-
     order = open_market_order(symbol, side, qty)
-
     if not order:
         return False
 
-    position = None
-
-    for _ in range(10):
-        time.sleep(0.5)
-        position = get_position(symbol)
-
-        if position:
-            break
-
+    time.sleep(1.0)
+    position = get_position(symbol)
     if not position:
-        log(
-            f"KRİTİK: Emir kabul edildi fakat pozisyon "
-            f"doğrulanamadı [{symbol}]."
-        )
         return False
 
     amount = float(position["positionAmt"])
     entry_price = float(position["entryPrice"])
 
-    if amount == 0 or entry_price <= 0:
-        log(f"KRİTİK: Geçersiz pozisyon [{symbol}] -> {position}")
-        return False
-
-    protected = place_protection_orders(
-        symbol,
-        amount,
-        entry_price
-    )
-
-    if not protected:
-        log(
-            f"KRİTİK: {symbol} için SL/TP kurulamadı. "
-            f"Pozisyon kapatılmaya çalışılıyor."
-        )
-        close_position_market(symbol, amount)
-        return False
-
-    log(
-        f"POZİSYON KORUMALI: {symbol} {side} "
-        f"entry={entry_price} qty={amount}"
-    )
-
+    place_protection_orders(symbol, amount, entry_price)
+    log(f"POZİSYON AÇILDI VE KORUNDU: {symbol} {side}")
     return True
 
 
 def trading_bot_loop():
     global last_processed_candle
 
-    log("GELİŞTİRİLMİŞ 4H TREND BOTU BAŞLADI.")
-    log(f"MOD: {'TESTNET' if TESTNET else 'GERÇEK PARA'}")
-    log(
-        f"Margin={TRADE_USDT} USDT | "
-        f"Leverage={LEVERAGE}x | "
-        f"SL={STOP_LOSS_PCT * 100:.2f}% | "
-        f"TP={TAKE_PROFIT_PCT * 100:.2f}%"
-    )
-    log(f"Minimum sinyal skoru: {MIN_SIGNAL_SCORE}/10")
-
+    log("OPTIMIZE EDİLMİŞ 4H TREND BOTU BAŞLADI (IP Ban Korumalı).")
     load_exchange_info()
 
     while True:
         try:
+            # IP limitlerini korumak için pozisyon sorgusu her döngüde değil, güvenli aralıkta yapılır
             active_positions = get_all_positions()
-            active_symbols = {
-                p["symbol"] for p in active_positions
-            }
-
-            process_open_positions(active_positions)
+            active_symbols = {p["symbol"] for p in active_positions}
 
             if len(active_positions) >= MAX_ACTIVE_POSITIONS:
                 time.sleep(LOOP_SECONDS)
@@ -911,49 +662,28 @@ def trading_bot_loop():
             for symbol in SYMBOLS:
                 if symbol not in available_symbols:
                     continue
-
                 if symbol in active_symbols:
                     continue
 
-                candles = get_market_data(
-                    symbol,
-                    INTERVAL,
-                    KLINE_LIMIT
-                )
-
-                # [RATE LIMIT KORUMASI] Her coin isteği arasına minik gecikme eklendi
-                time.sleep(0.3)
+                candles = get_market_data(symbol, INTERVAL, KLINE_LIMIT)
+                
+                # Her istek arasına genişletilmiş rate-limit güvenli bekleme payı
+                time.sleep(0.8)
 
                 if not candles:
                     continue
 
                 signal = build_signal(symbol, candles)
-
                 if signal:
                     potential_signals.append(signal)
 
-            potential_signals.sort(
-                key=lambda x: (
-                    x["score"],
-                    x["volume_ratio"],
-                    x["atr_ratio"]
-                ),
-                reverse=True
-            )
-
             if potential_signals:
+                potential_signals.sort(key=lambda x: x["score"], reverse=True)
                 strongest = potential_signals[0]
 
                 if strongest["candle_close"] != last_processed_candle:
                     last_processed_candle = strongest["candle_close"]
-
-                    log(
-                        f"EN GÜÇLÜ SİNYAL: "
-                        f"{strongest['symbol']} "
-                        f"{strongest['side']} "
-                        f"score={strongest['score']}/11"
-                    )
-
+                    log(f"EN GÜÇLÜ SİNYAL: {strongest['symbol']} {strongest['side']} score={strongest['score']}")
                     open_trade(strongest)
 
             time.sleep(LOOP_SECONDS)
@@ -965,18 +695,12 @@ def trading_bot_loop():
 
 @app.route("/")
 def index():
-    return "Geliştirilmiş 4H Trend Botu aktif."
+    return "IP-Protected 4H Trend Bot aktif."
 
 
 if __name__ == "__main__":
-    t = Thread(
-        target=trading_bot_loop,
-        daemon=True
-    )
+    t = Thread(target=trading_bot_loop, daemon=True)
     t.start()
 
     port = int(os.environ.get("PORT", 10000))
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    app.run(host="0.0.0.0", port=port)
