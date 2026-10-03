@@ -29,13 +29,30 @@ if not API_KEY or not API_SECRET:
     )
 
 # ============================================================
-# STRATEJİ
+# STRATEJİ & SABİT FİLTRE DEĞERLERİ (IP Ban Riskine Karşı Hardcoded)
 # ============================================================
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "DOTUSDT", "LINKUSDT",
     "NEARUSDT", "APTUSDT", "ATOMUSDT"
 ]
+
+# Her sembol için adım büyüklüğü, fiyat adımı ve ondalık hassasiyetler
+SYMBOL_CONFIGS = {
+    "BTCUSDT": {"step": 0.001, "tick": 0.1, "qty_precision": 3},
+    "ETHUSDT": {"step": 0.001, "tick": 0.01, "qty_precision": 3},
+    "BNBUSDT": {"step": 0.01, "tick": 0.01, "qty_precision": 2},
+    "SOLUSDT": {"step": 0.01, "tick": 0.01, "qty_precision": 2},
+    "XRPUSDT": {"step": 0.1, "tick": 0.0001, "qty_precision": 1},
+    "ADAUSDT": {"step": 0.1, "tick": 0.0001, "qty_precision": 1},
+    "AVAXUSDT": {"step": 0.01, "tick": 0.01, "qty_precision": 2},
+    "DOGEUSDT": {"step": 1.0, "tick": 0.00001, "qty_precision": 0},
+    "DOTUSDT": {"step": 0.01, "tick": 0.01, "qty_precision": 2},
+    "LINKUSDT": {"step": 0.01, "tick": 0.01, "qty_precision": 2},
+    "NEARUSDT": {"step": 0.01, "tick": 0.001, "qty_precision": 2},
+    "APTUSDT": {"step": 0.01, "tick": 0.01, "qty_precision": 2},
+    "ATOMUSDT": {"step": 0.01, "tick": 0.01, "qty_precision": 2},
+}
 
 INTERVAL = "4h"
 LEVERAGE = 3
@@ -50,14 +67,9 @@ STOP_LOSS_PCT = 0.025
 TAKE_PROFIT_PCT = 0.075
 
 KLINE_LIMIT = 250
-LOOP_SECONDS = 180  # Ortak IP ban riskini minimuma indirmek için döngü süresi esnetildi
+LOOP_SECONDS = 180
 
 BOT_ORDER_PREFIX = "BOT4H"
-
-symbol_step_sizes = {}
-symbol_precisions = {}
-symbol_tick_sizes = {}
-available_symbols = set()
 last_processed_candle = None
 
 session = requests.Session()
@@ -131,55 +143,6 @@ def send_signed_request(http_method, url_path, payload=None, retries=3):
                 return {}
 
     return {}
-
-
-def load_exchange_info():
-    global symbol_step_sizes, symbol_precisions
-    global symbol_tick_sizes, available_symbols
-
-    url = f"{BASE_URL}/fapi/v1/exchangeInfo"
-    
-    # Render IP banlarının ilk açılışta geçmesi için kısa bir ısınma uykusu
-    time.sleep(5)
-
-    while True:
-        try:
-            res = session.get(url, timeout=10).json()
-
-            if "symbols" not in res:
-                if isinstance(res, dict) and res.get("code") in (-1003, 418):
-                    log("ExchangeInfo IP Ban / Rate-Limit yakalandı. 180 saniye bekleniyor...")
-                    time.sleep(180)
-                    continue
-                log(f"ExchangeInfo yanıtı geçersiz: {res}")
-                time.sleep(30)
-                continue
-
-            for s in res["symbols"]:
-                sym = s["symbol"]
-
-                if s.get("status") != "TRADING":
-                    continue
-                if s.get("quoteAsset") != "USDT":
-                    continue
-
-                available_symbols.add(sym)
-                symbol_precisions[sym] = int(
-                    s.get("quantityPrecision", 3)
-                )
-
-                for f in s.get("filters", []):
-                    if f["filterType"] == "LOT_SIZE":
-                        symbol_step_sizes[sym] = float(f["stepSize"])
-                    elif f["filterType"] == "PRICE_FILTER":
-                        symbol_tick_sizes[sym] = float(f["tickSize"])
-
-            log("Binance exchangeInfo başarıyla yüklendi ve belleğe alındı.")
-            return True
-
-        except Exception as e:
-            log(f"ExchangeInfo hatası: {e}")
-            time.sleep(30)
 
 
 def set_leverage(symbol):
@@ -346,14 +309,16 @@ def round_step(value, step):
 
 
 def format_qty(symbol, amount):
-    step = float(symbol_step_sizes.get(symbol, 0.001))
-    precision = int(symbol_precisions.get(symbol, 3))
+    cfg = SYMBOL_CONFIGS.get(symbol, {"step": 0.001, "qty_precision": 3})
+    step = float(cfg["step"])
+    precision = int(cfg["qty_precision"])
     rounded = round_step(float(amount), step)
     return f"{rounded:.{precision}f}"
 
 
 def format_price(symbol, price):
-    tick = float(symbol_tick_sizes.get(symbol, 0.01))
+    cfg = SYMBOL_CONFIGS.get(symbol, {"tick": 0.01})
+    tick = float(cfg["tick"])
     price = float(price)
 
     if tick <= 0:
@@ -457,7 +422,7 @@ def place_protection_orders(symbol, position_amt, entry_price):
         }
     )
 
-    time.sleep(1.5)
+    time.sleep(1.0)
 
     send_signed_request(
         "POST",
@@ -625,10 +590,10 @@ def open_trade(signal):
 def trading_bot_loop():
     global last_processed_candle
 
-    log("GÜVENLİ 4H TREND BOTU BAŞLADI (IP Ban Korumalı).")
+    log("GÜVENLİ 4H TREND BOTU BAŞLADI (ExchangeInfo Kaldırıldı).")
     
-    # ExchangeInfo bir kez yüklenir ve hafızada tutulur
-    load_exchange_info()
+    # Render IP ban riskini önlemek için başlangıçta güvenli bekleme
+    time.sleep(5)
 
     while True:
         try:
@@ -642,15 +607,11 @@ def trading_bot_loop():
             potential_signals = []
 
             for symbol in SYMBOLS:
-                if symbol not in available_symbols:
-                    continue
                 if symbol in active_symbols:
                     continue
 
                 candles = get_market_data(symbol, INTERVAL, KLINE_LIMIT)
-                
-                # Render IP ban limitlerine takılmamak için her coin sorgusu arasına güvenli bekleme
-                time.sleep(2.0)
+                time.sleep(1.5)  # İstekler arasına güvenli nefes payı
 
                 if not candles:
                     continue
