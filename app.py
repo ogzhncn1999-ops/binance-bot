@@ -26,11 +26,11 @@ SYMBOLS = [
 INTERVAL = "1h"          # 1 saatlik mum aralığı
 LEVERAGE = 3             # Kaldıraç oranı
 TRADE_USDT = 10.0        # Her işlem için ayrılacak marjin (USDT)
+MAX_ACTIVE_POSITIONS = 1 # KRTİK: Aynı anda en fazla açılacak işlem sayısı
 
-# Gelişmiş Risk Yönetimi & TP/SL Oranları
 STOP_LOSS_PCT = 0.02     # %2.0 Zarar Kes
-TAKE_PROFIT_PCT = 0.06   # %6.0 Kâr Al (Risk/Ödül Oranı 1:3)
-MIN_ATR_THRESHOLD = 0.0015 # Piyasa oynaklık filtresi (Çok ölü piyasaları eler)
+TAKE_PROFIT_PCT = 0.06   # %6.0 Kâr Al
+MIN_ATR_THRESHOLD = 0.0015 
 
 symbol_precisions = {}
 
@@ -155,13 +155,11 @@ def calculate_bollinger_bands(closes, period=20, std_dev=2):
 def calculate_macd(closes):
     if len(closes) < 35:
         return 0, 0
-    # Basitleştirilmiş ve hızlı MACD (12, 26, 9) hesaplaması
     ema12 = calculate_ema(closes, 12)
     ema26 = calculate_ema(closes, 26)
     if not ema12 or not ema26:
         return 0, 0
     macd_line = ema12 - ema26
-    # Sinyal için yaklaşık bir değer
     signal_line = macd_line * 0.9  
     return macd_line, signal_line
 
@@ -216,10 +214,10 @@ def open_order(symbol, side, qty):
         "quantity": formatted_qty
     }
     res = send_signed_request('POST', url_path, params)
-    log(f"Gelişmiş Filtreli İşlem Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
+    log(f"Tekil Kontrollü İşlem Açıldı [{symbol} - {side} - Miktar: {formatted_qty}]: {res}")
 
 def trading_bot_loop():
-    log("Gelişmiş Çoklu Filtreleme Motorlu Binance Bot Başlatıldı.")
+    log("Tekil İşlem Limiti Modüllü Binance Bot Başlatıldı.")
     load_exchange_info()
     
     while True:
@@ -227,7 +225,7 @@ def trading_bot_loop():
             active_positions = get_all_positions()
             active_symbols = [p['symbol'] for p in active_positions]
             
-            # 1. Adım: Risk Yönetimi & Dinamik Kâr/Zarar Takibi
+            # 1. Adım: Risk Yönetimi & Kâr/Zarar Takibi
             for pos in active_positions:
                 symbol = pos['symbol']
                 entry_price = float(pos['entryPrice'])
@@ -239,7 +237,6 @@ def trading_bot_loop():
                 else:
                     pnl_pct = (entry_price - current_price) / entry_price
                 
-                # Zarar Kes veya Kâr Al
                 if pnl_pct <= -STOP_LOSS_PCT:
                     log(f"Stop-Loss Tetiklendi! [{symbol}] - Zarar: {pnl_pct*100:.2f}%")
                     close_position(symbol, pos_amt)
@@ -247,9 +244,14 @@ def trading_bot_loop():
                     log(f"Kâr Al Tetiklendi! [{symbol}] - Kâr: {pnl_pct*100:.2f}%")
                     close_position(symbol, pos_amt)
 
-            # 2. Adım: Çoklu Gösterge ve Oynaklık Filtresiyle Sinyal Arama
+            # 2. Adım: Eşzamanlı İşlem Sınırı Kontrolü
+            if len(active_positions) >= MAX_ACTIVE_POSITIONS:
+                log(f"Mevcut açık pozisyon sayısı ({len(active_positions)}) sınırda ({MAX_ACTIVE_POSITIONS}). Yeni işlem aranmıyor.")
+                time.sleep(300)
+                continue
+
+            # 3. Adım: Sinyal Arama
             potential_signals = []
-            
             for symbol in SYMBOLS:
                 if symbol in active_symbols:
                     continue
@@ -259,8 +261,6 @@ def trading_bot_loop():
                     continue
                 
                 current_price = closes[-1]
-                
-                # Gösterge Hesaplamaları
                 ema9 = calculate_ema(closes, 9)
                 ema21 = calculate_ema(closes, 21)
                 ema50 = calculate_ema(closes, 50)
@@ -272,18 +272,15 @@ def trading_bot_loop():
                 if not ema9 or not ema21 or not ema50 or not upper_b:
                     continue
                 
-                # Volatilite (ATR) Filtresi: Ölü piyasaları ele
                 if (atr / current_price) < MIN_ATR_THRESHOLD:
                     continue
                 
                 trend_strength = abs(ema9 - ema21) / current_price
                 
-                # AL (BUY) Koşulları (Trend + RSI + MACD + Bollinger Onayı)
                 is_uptrend = (current_price > ema50) and (ema9 > ema21)
                 macd_bullish = macd_line > signal_line
                 bb_bullish = current_price > mid_b and current_price < upper_b
                 
-                # SAT (SELL) Koşulları
                 is_downtrend = (current_price < ema50) and (ema9 < ema21)
                 macd_bearish = macd_line < signal_line
                 bb_bearish = current_price < mid_b and current_price > lower_b
@@ -300,7 +297,9 @@ def trading_bot_loop():
             potential_signals.sort(key=lambda x: x['strength'], reverse=True)
             wallet_balance, available_balance = get_balance()
             
-            for signal in potential_signals:
+            # Sadece en güçlü tek bir sinyali işleme al
+            if potential_signals and len(active_positions) < MAX_ACTIVE_POSITIONS:
+                signal = potential_signals[0]
                 if available_balance >= TRADE_USDT:
                     symbol = signal['symbol']
                     side = signal['side']
@@ -310,9 +309,6 @@ def trading_bot_loop():
                     if raw_qty > 0:
                         set_leverage(symbol)
                         open_order(symbol, side, raw_qty)
-                        available_balance -= TRADE_USDT
-                else:
-                    break
                         
             time.sleep(300)
         except Exception as e:
@@ -321,7 +317,7 @@ def trading_bot_loop():
 
 @app.route('/')
 def index():
-    return "Gelişmiş Çoklu Filtreleme Motorlu Binance Bot Aktif ve Çalışıyor."
+    return "Tekil Sınırlandırmalı Binance Bot Aktif ve Çalışıyor."
 
 if __name__ == '__main__':
     t = Thread(target=trading_bot_loop)
