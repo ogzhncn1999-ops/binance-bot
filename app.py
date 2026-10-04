@@ -67,7 +67,7 @@ STOP_LOSS_PCT = 0.025
 TAKE_PROFIT_PCT = 0.075
 
 KLINE_LIMIT = 250
-LOOP_SECONDS = 180
+LOOP_SECONDS = 300  # İstek sıklığını azaltmak için 5 dakikaya çıkarıldı
 
 BOT_ORDER_PREFIX = "BOT4H"
 last_processed_candle = None
@@ -125,12 +125,12 @@ def send_signed_request(http_method, url_path, payload=None, retries=3):
             if response.status_code == 418 or (
                 isinstance(data, dict) and data.get("code") == -1003
             ):
-                log("BINANCE 418/-1003: IP rate-limit ban. 180 saniye bekleniyor.")
-                time.sleep(180)
+                log("BINANCE 418/-1003: IP rate-limit ban. 300 saniye bekleniyor.")
+                time.sleep(300)
                 continue
 
             if response.status_code == 429:
-                time.sleep(30 + attempt * 10)
+                time.sleep(45 + attempt * 15)
                 continue
 
             return {}
@@ -138,7 +138,7 @@ def send_signed_request(http_method, url_path, payload=None, retries=3):
         except Exception as e:
             log(f"API İstek Hatası {url_path}: {e}")
             if attempt < retries:
-                time.sleep(10)
+                time.sleep(15)
             else:
                 return {}
 
@@ -422,7 +422,7 @@ def place_protection_orders(symbol, position_amt, entry_price):
         }
     )
 
-    time.sleep(1.0)
+    time.sleep(1.5)
 
     send_signed_request(
         "POST",
@@ -590,7 +590,7 @@ def open_trade(signal):
 def trading_bot_loop():
     global last_processed_candle
 
-    log("GÜVENLİ 4H TREND BOTU BAŞLADI (ExchangeInfo Kaldırıldı).")
+    log("GÜVENLİ 4H TREND BOTU BAŞLADI (Rate-Limit Optimizasyonlu).")
     
     # Render IP ban riskini önlemek için başlangıçta güvenli bekleme
     time.sleep(5)
@@ -611,7 +611,7 @@ def trading_bot_loop():
                     continue
 
                 candles = get_market_data(symbol, INTERVAL, KLINE_LIMIT)
-                time.sleep(1.5)  # İstekler arasına güvenli nefes payı
+                time.sleep(3.5)  # IP ban riskini düşürmek için semboller arası bekleme artırıldı
 
                 if not candles:
                     continue
